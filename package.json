@@ -1,0 +1,11 @@
+{
+  "name": "dockman",
+  "version": "1.0.0",
+  "description": "Docker Compose TUI manager with vim keybindings",
+  "main": "index.js",
+  "bin": {
+    "dockman": "./index.js"
+  },
+  "keywords": ["docker", "compose", "tui", "cli"],
+  "license": "MIT"
+}

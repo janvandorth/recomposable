@@ -1,0 +1,7 @@
+{
+  "composeFiles": [
+    "docker-compose.yml"
+  ],
+  "pollInterval": 3000,
+  "logTailLines": 100
+}
