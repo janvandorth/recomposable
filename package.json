@@ -1,11 +1,33 @@
 {
-  "name": "dockman",
+  "name": "recomposable",
   "version": "1.0.0",
-  "description": "Docker Compose TUI manager with vim keybindings",
+  "description": "Docker Compose TUI manager with vim keybindings — monitor, restart, rebuild, and tail logs for your services",
   "main": "index.js",
   "bin": {
-    "dockman": "./index.js"
+    "recomposable": "./index.js"
   },
-  "keywords": ["docker", "compose", "tui", "cli"],
-  "license": "MIT"
+  "files": [
+    "index.js",
+    "lib/"
+  ],
+  "keywords": [
+    "docker",
+    "docker-compose",
+    "compose",
+    "tui",
+    "cli",
+    "terminal",
+    "devops",
+    "containers",
+    "vim"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/janvandorth/recomposable.git"
+  },
+  "author": "Jan van Dorth",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0"
+  }
 }
