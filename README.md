@@ -2,6 +2,8 @@
 
 A lightweight Docker Compose TUI manager with vim keybindings. Monitor service status, restart or rebuild containers, and tail logs — all from your terminal.
 
+Eliminate switching between countless terminal tabs or windows to rebuild you docker compose containers.
+
 Zero dependencies. Pure Node.js.
 
 ![recomposable list view](screenshots/list-view.png)
