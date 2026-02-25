@@ -12,7 +12,7 @@ const { createState, statusKey, buildFlatList, MODE } = require('../lib/state');
 const { clearScreen, renderListView, renderLogView } = require('../lib/renderer');
 
 // --- Mock terminal dimensions ---
-const COLS = 120;
+const COLS = 150;
 const ROWS = 48;
 process.stdout.columns = COLS;
 process.stdout.rows = ROWS;
@@ -35,6 +35,13 @@ const config = {
   logScanPatterns: ['WRN]', 'ERR]'],
   logScanLines: 1000,
   logScanInterval: 10000,
+  statsInterval: 5000,
+  statsBufferSize: 6,
+  bottomLogCount: 10,
+  cpuWarnThreshold: 50,
+  cpuDangerThreshold: 100,
+  memWarnThreshold: 512,
+  memDangerThreshold: 1024,
 };
 
 // --- Build mock state ---
@@ -74,25 +81,25 @@ state.flatList = buildFlatList(state.groups);
 // --- Mock statuses ---
 const mockStatuses = {
   // infra - mostly long-running
-  'infra/docker-compose.yml::postgres':  { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc1' },
-  'infra/docker-compose.yml::redis':     { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc2' },
-  'infra/docker-compose.yml::rabbitmq':  { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc3' },
-  'infra/docker-compose.yml::minio':     { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc4' },
-  'infra/docker-compose.yml::qdrant':    { state: 'running', health: 'unhealthy', createdAt: days(14), startedAt: days(3), id: 'abc5' },
+  'infra/docker-compose.yml::postgres':  { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc1', ports: [{ published: 5432, target: 5432 }] },
+  'infra/docker-compose.yml::redis':     { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc2', ports: [{ published: 6379, target: 6379 }] },
+  'infra/docker-compose.yml::rabbitmq':  { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc3', ports: [{ published: 5672, target: 5672 }, { published: 15672, target: 15672 }] },
+  'infra/docker-compose.yml::minio':     { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc4', ports: [{ published: 9000, target: 9000 }] },
+  'infra/docker-compose.yml::qdrant':    { state: 'running', health: 'unhealthy', createdAt: days(14), startedAt: days(3), id: 'abc5', ports: [{ published: 6333, target: 6333 }] },
 
   // services - mix of states
-  'services/docker-compose.yml::api-gateway':          { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'svc1' },
-  'services/docker-compose.yml::auth-service':         { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'svc2' },
-  'services/docker-compose.yml::user-service':         { state: 'running', health: 'healthy', createdAt: hours(2), startedAt: hours(2), id: 'svc3' },
-  'services/docker-compose.yml::billing-service':      { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'svc4' },
+  'services/docker-compose.yml::api-gateway':          { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'svc1', ports: [{ published: 8080, target: 8080 }] },
+  'services/docker-compose.yml::auth-service':         { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'svc2', ports: [{ published: 5001, target: 5001 }] },
+  'services/docker-compose.yml::user-service':         { state: 'running', health: 'healthy', createdAt: hours(2), startedAt: hours(2), id: 'svc3', ports: [{ published: 5002, target: 5002 }] },
+  'services/docker-compose.yml::billing-service':      { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'svc4', ports: [{ published: 5003, target: 5003 }] },
   'services/docker-compose.yml::notification-service': null,  // stopped
-  'services/docker-compose.yml::search-service':       { state: 'running', health: 'healthy', createdAt: days(2), startedAt: days(1), id: 'svc6' },
-  'services/docker-compose.yml::analytics-service':    { state: 'running', health: 'healthy', createdAt: days(1), startedAt: minutes(45), id: 'svc7' },
+  'services/docker-compose.yml::search-service':       { state: 'running', health: 'healthy', createdAt: days(2), startedAt: days(1), id: 'svc6', ports: [{ published: 5005, target: 5005 }] },
+  'services/docker-compose.yml::analytics-service':    { state: 'running', health: 'healthy', createdAt: days(1), startedAt: minutes(45), id: 'svc7', ports: [{ published: 5006, target: 5006 }] },
 
   // apps
-  'apps/docker-compose.yml::web-app':          { state: 'running', health: 'healthy', createdAt: hours(2), startedAt: hours(2), id: 'app1' },
-  'apps/docker-compose.yml::admin-dashboard':  { state: 'running', health: 'healthy', createdAt: days(3), startedAt: days(1), id: 'app2' },
-  'apps/docker-compose.yml::worker':           { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'app3' },
+  'apps/docker-compose.yml::web-app':          { state: 'running', health: 'healthy', createdAt: hours(2), startedAt: hours(2), id: 'app1', ports: [{ published: 3000, target: 3000 }] },
+  'apps/docker-compose.yml::admin-dashboard':  { state: 'running', health: 'healthy', createdAt: days(3), startedAt: days(1), id: 'app2', ports: [{ published: 3001, target: 3001 }] },
+  'apps/docker-compose.yml::worker':           { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'app3', ports: [] },
 };
 
 for (const [key, val] of Object.entries(mockStatuses)) {
@@ -124,6 +131,30 @@ for (const [key, counts] of Object.entries(mockLogCounts)) {
   const m = new Map();
   for (const [p, c] of Object.entries(counts)) m.set(p, c);
   state.logCounts.set(key, m);
+}
+
+// --- Mock container stats ---
+const mockStats = {
+  'infra/docker-compose.yml::postgres':  { cpuPercent: 3.2, memUsageBytes: 256 * 1024 * 1024 },
+  'infra/docker-compose.yml::redis':     { cpuPercent: 0.8, memUsageBytes: 42 * 1024 * 1024 },
+  'infra/docker-compose.yml::rabbitmq':  { cpuPercent: 1.5, memUsageBytes: 178 * 1024 * 1024 },
+  'infra/docker-compose.yml::minio':     { cpuPercent: 0.3, memUsageBytes: 95 * 1024 * 1024 },
+  'infra/docker-compose.yml::qdrant':    { cpuPercent: 12.4, memUsageBytes: 890 * 1024 * 1024 },
+
+  'services/docker-compose.yml::api-gateway':          { cpuPercent: 8.7, memUsageBytes: 312 * 1024 * 1024 },
+  'services/docker-compose.yml::auth-service':         { cpuPercent: 2.1, memUsageBytes: 128 * 1024 * 1024 },
+  'services/docker-compose.yml::user-service':         { cpuPercent: 4.3, memUsageBytes: 195 * 1024 * 1024 },
+  'services/docker-compose.yml::billing-service':      { cpuPercent: 1.0, memUsageBytes: 87 * 1024 * 1024 },
+  'services/docker-compose.yml::search-service':       { cpuPercent: 55.2, memUsageBytes: 620 * 1024 * 1024 },
+  'services/docker-compose.yml::analytics-service':    { cpuPercent: 15.8, memUsageBytes: 445 * 1024 * 1024 },
+
+  'apps/docker-compose.yml::web-app':          { cpuPercent: 6.1, memUsageBytes: 234 * 1024 * 1024 },
+  'apps/docker-compose.yml::admin-dashboard':  { cpuPercent: 0.5, memUsageBytes: 67 * 1024 * 1024 },
+  'apps/docker-compose.yml::worker':           { cpuPercent: 22.3, memUsageBytes: 1.2 * 1024 * 1024 * 1024 },
+};
+
+for (const [key, val] of Object.entries(mockStats)) {
+  state.containerStats.set(key, val);
 }
 
 // --- Mock: one service is rebuilding ---
