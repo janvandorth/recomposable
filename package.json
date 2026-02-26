@@ -2,15 +2,24 @@
   "name": "recomposable",
   "version": "1.1.0",
   "description": "Docker Compose TUI manager with vim keybindings — monitor, restart, rebuild, and tail logs for your services",
-  "main": "index.js",
+  "main": "dist/index.js",
   "bin": {
-    "recomposable": "./index.js"
+    "recomposable": "./dist/index.js"
   },
   "files": [
-    "index.js",
-    "lib/",
+    "dist/",
     "screenshots/"
   ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "screenshot": "tsc -p tsconfig.scripts.json && node dist-scripts/scripts/screenshot.js",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist dist-scripts *.tsbuildinfo"
+  },
   "keywords": [
     "docker",
     "docker-compose",
@@ -30,5 +39,10 @@
   "license": "MIT",
   "engines": {
     "node": ">=16.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5.7",
+    "vitest": "^3.0"
   }
 }

@@ -1,6 +1,5 @@
-'use strict';
-
-const { statusKey, MODE } = require('./state');
+import { statusKey, MODE } from './state';
+import type { AppState, LegendOptions, DisplayLine } from './types';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -18,43 +17,42 @@ const ITALIC = `${ESC}3m`;
 const BG_HIGHLIGHT = `${ESC}48;5;237m`;
 
 const LOGO = [
-  ` ${ITALIC}${BOLD}${FG_CYAN}┌─┐┌─┐┌─┐┌─┐┌┬┐┌─┐┌─┐┌─┐┌─┐┌┐ ┬  ┌─┐${RESET}`,
-  ` ${ITALIC}${BOLD}${FG_CYAN}├┬┘├┤ │  │ ││││├─┘│ │└─┐├─┤├┴┐│  ├┤${RESET}`,
-  ` ${ITALIC}${BOLD}${FG_CYAN}┴└─└─┘└─┘└─┘┴ ┴┴  └─┘└─┘┴ ┴└─┘┴─┘└─┘${RESET}`,
+  ` ${ITALIC}${BOLD}${FG_CYAN}\u250C\u2500\u2510\u250C\u2500\u2510\u250C\u2500\u2510\u250C\u2500\u2510\u250C\u252C\u2510\u250C\u2500\u2510\u250C\u2500\u2510\u250C\u2500\u2510\u250C\u2500\u2510\u250C\u2510 \u252C  \u250C\u2500\u2510${RESET}`,
+  ` ${ITALIC}${BOLD}${FG_CYAN}\u251C\u252C\u2518\u251C\u2524 \u2502  \u2502 \u2502\u2502\u2502\u2502\u251C\u2500\u2518\u2502 \u2502\u2514\u2500\u2510\u251C\u2500\u2524\u251C\u2534\u2510\u2502  \u251C\u2524${RESET}`,
+  ` ${ITALIC}${BOLD}${FG_CYAN}\u2534\u2514\u2500\u2514\u2500\u2518\u2514\u2500\u2518\u2514\u2500\u2518\u2534 \u2534\u2534  \u2514\u2500\u2518\u2514\u2500\u2518\u2534 \u2534\u2514\u2500\u2518\u2534\u2500\u2518\u2514\u2500\u2518${RESET}`,
   ``,
   ` ${DIM}docker compose manager${RESET}`,
   ``,
 ];
 
-function visLen(str) {
+export function visLen(str: string): number {
   return str.replace(/\x1b\[[0-9;]*m/g, '').length;
 }
 
-function padVisible(str, width) {
+export function padVisible(str: string, width: number): string {
   const pad = Math.max(0, width - visLen(str));
   return str + ' '.repeat(pad);
 }
 
-function padVisibleStart(str, width) {
+export function padVisibleStart(str: string, width: number): string {
   const pad = Math.max(0, width - visLen(str));
   return ' '.repeat(pad) + str;
 }
 
 const PATTERN_COLORS = [FG_YELLOW, FG_RED, FG_CYAN, FG_WHITE];
 
-function patternLabel(pattern) {
+function patternLabel(pattern: string): string {
   return pattern.replace(/^[\[\(\{<]/, '').replace(/[\]\)\}>]$/, '');
 }
 
-function parseTimestamp(ts) {
+function parseTimestamp(ts: string | null | undefined): Date | null {
   if (!ts) return null;
-  // Strip trailing timezone abbreviation (e.g., "UTC", "CET")
   const cleaned = ts.replace(/ [A-Z]{2,5}$/, '');
   const d = new Date(cleaned);
   return isNaN(d.getTime()) ? null : d;
 }
 
-function relativeTime(ts) {
+export function relativeTime(ts: string | null | undefined): string {
   const date = parseTimestamp(ts);
   if (!date) return `${FG_GRAY}-${RESET}`;
   const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
@@ -68,15 +66,15 @@ function relativeTime(ts) {
   return `${DIM}${days}d ago${RESET}`;
 }
 
-function clearScreen() {
+export function clearScreen(): string {
   return `${ESC}2J${ESC}H${ESC}?25l`;
 }
 
-function showCursor() {
+export function showCursor(): string {
   return `${ESC}?25h`;
 }
 
-function statusIcon(status, isRebuilding, isRestarting, isStopping, isStarting) {
+export function statusIcon(status: { state: string; health: string } | null | undefined, isRebuilding: boolean, isRestarting: boolean, isStopping: boolean, isStarting: boolean): string {
   if (isRebuilding || isRestarting || isStopping || isStarting) return `${FG_YELLOW}\u25CF${RESET}`;
   if (!status) return `${FG_GRAY}\u25CB${RESET}`;
 
@@ -89,7 +87,7 @@ function statusIcon(status, isRebuilding, isRestarting, isStopping, isStarting) 
   return `${FG_GRAY}\u25CB${RESET}`;
 }
 
-function statusText(status, isRebuilding, isRestarting, isStopping, isStarting) {
+export function statusText(status: { state: string; health: string } | null | undefined, isRebuilding: boolean, isRestarting: boolean, isStopping: boolean, isStarting: boolean): string {
   if (isStopping) return `${FG_YELLOW}STOPPING...${RESET}`;
   if (isStarting) return `${FG_YELLOW}STARTING...${RESET}`;
   if (isRestarting) return `${FG_YELLOW}RESTARTING...${RESET}`;
@@ -111,19 +109,38 @@ function statusText(status, isRebuilding, isRestarting, isStopping, isStarting) 
   return `${DIM}${text}${RESET}`;
 }
 
-function formatMem(bytes) {
+export function formatMem(bytes: number): string {
   if (bytes <= 0) return '-';
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}K`;
   if (bytes < 1024 * 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))}M`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}G`;
 }
 
-function renderLegend(opts = {}) {
-  const { logPanelActive = false, fullLogsActive = false, logsScrollMode = false, noCacheActive = false } = opts;
-  const item = (text, active) => {
+export function renderLegend(opts: LegendOptions = {}): string {
+  const { logPanelActive = false, logsScrollMode = false, noCacheActive = false, watchActive = false, execMode = false, execInline = false } = opts;
+  const item = (text: string, active: boolean): string => {
     if (active) return `${BG_HIGHLIGHT} ${text} ${RESET}`;
     return `${DIM}${text}${RESET}`;
   };
+  if (execMode) {
+    return [
+      item('[Esc] back', false),
+      item('[Enter] run', false),
+      item('[Up/Down] history', false),
+      item('[Ctrl+C] kill', false),
+      item('[Q]uit', false),
+    ].join('  ');
+  }
+  if (execInline) {
+    return [
+      item('[Esc] back', false),
+      item('[Enter] run', false),
+      item('[Up/Down] history', false),
+      item('[Ctrl+C] kill', false),
+      item('[x] full screen', false),
+      item('[Q]uit', false),
+    ].join('  ');
+  }
   if (logsScrollMode) {
     return [
       item('[Esc] back', false),
@@ -137,42 +154,79 @@ function renderLegend(opts = {}) {
   }
   return [
     item('Re[B]uild', false),
+    item('[D]ep rebuild', false),
     item('[S]tart/restart', false),
     item('Sto[P]', false),
+    item('[W]atch', watchActive),
     item('[N]o cache', noCacheActive),
-    item('[F]ull logs', fullLogsActive),
+    item('[e]xec', false),
+    item('[F]ull logs', false),
     item('[L]og panel', logPanelActive),
     item('[Q]uit', false),
   ].join('  ');
 }
 
-function renderListView(state) {
-  const { columns = 80, rows = 24 } = process.stdout;
+export function renderListView(state: AppState): string {
+  const columns = process.stdout.columns ?? 80;
+  const rows = process.stdout.rows ?? 24;
   const patterns = state.config.logScanPatterns || [];
-  const buf = [];
+  const buf: string[] = [];
 
-  // Logo
   for (const line of LOGO) {
     buf.push(line);
   }
-  const help = renderLegend({ logPanelActive: state.showBottomLogs, noCacheActive: state.noCache });
-  buf.push(` ${FG_GRAY}${'─'.repeat(Math.max(0, columns - 2))}${RESET}`);
+  const watchActive = state.watching.size > 0;
+  const help = state.execActive
+    ? renderLegend({ execInline: true })
+    : renderLegend({ logPanelActive: state.showBottomLogs, noCacheActive: state.noCache, watchActive });
+  buf.push(` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`);
   buf.push(` ${help}`);
 
   const headerHeight = buf.length;
 
-  // Build bottom panel content — show logs for the currently selected container
-  const bottomBuf = [];
-  if (state.showBottomLogs) {
+  const bottomBuf: string[] = [];
+  if (state.execActive && state.execService) {
+    bottomBuf.push(` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`);
+    const runningIndicator = state.execChild ? `${FG_YELLOW}running${RESET}` : `${FG_GREEN}ready${RESET}`;
+    const cwdInfo = state.execCwd ? `  ${DIM}${state.execCwd}${RESET}` : '';
+    bottomBuf.push(` ${FG_CYAN}exec ${BOLD}${state.execService}${RESET}  ${runningIndicator}${cwdInfo}`);
+    const maxOutputLines = Math.max(1, (state.config.bottomLogCount || 10) - 1);
+    const outputStart = Math.max(0, state.execOutputLines.length - maxOutputLines);
+    for (let i = outputStart; i < state.execOutputLines.length; i++) {
+      bottomBuf.push(truncateLine(`  ${state.execOutputLines[i]}`, columns));
+    }
+    bottomBuf.push(`${FG_GREEN}$ ${RESET}${state.execInput}${BOLD}_${RESET}`);
+  } else if (state.showBottomLogs) {
     const selEntry = state.flatList[state.cursor];
     if (selEntry) {
       const sk = statusKey(selEntry.file, selEntry.service);
+
+      // Check for cascade progress
+      const cascade = state.cascading.get(sk);
+      if (cascade) {
+        bottomBuf.push(` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`);
+        bottomBuf.push(` ${FG_YELLOW}cascading ${BOLD}${selEntry.service}${RESET}`);
+        for (let si = 0; si < cascade.steps.length; si++) {
+          const step = cascade.steps[si];
+          let marker: string;
+          switch (step.status) {
+            case 'completed': marker = `${FG_GREEN}[done]${RESET}`; break;
+            case 'in_progress': marker = `${FG_YELLOW}[>>> ]${RESET}`; break;
+            case 'failed': marker = `${FG_RED}[FAIL]${RESET}`; break;
+            default: marker = `${DIM}[    ]${RESET}`;
+          }
+          bottomBuf.push(`  ${marker} ${step.action} ${BOLD}${step.service}${RESET}`);
+        }
+      }
+
       const info = state.bottomLogLines.get(sk);
       if (info) {
-        bottomBuf.push(` ${FG_GRAY}${'─'.repeat(Math.max(0, columns - 2))}${RESET}`);
-        const actionColor = info.action === 'rebuilding' || info.action === 'restarting' || info.action === 'stopping' || info.action === 'starting' ? FG_YELLOW : FG_GREEN;
+        if (!cascade) {
+          bottomBuf.push(` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`);
+        }
+        const actionColor = info.action === 'rebuilding' || info.action === 'restarting' || info.action === 'stopping' || info.action === 'starting' || info.action === 'cascading' ? FG_YELLOW
+          : info.action === 'watching' ? FG_CYAN : FG_GREEN;
         let headerLine = ` ${actionColor}${info.action} ${BOLD}${info.service}${RESET}`;
-        // Show search info
         const bq = state.bottomSearchQuery || '';
         if (bq && !state.bottomSearchActive) {
           const matchCount = info.lines.filter(l => l.toLowerCase().includes(bq.toLowerCase())).length;
@@ -186,7 +240,6 @@ function renderListView(state) {
 
         for (const line of info.lines) {
           let coloredLine = line.substring(0, columns - 4);
-          // Highlight search query
           if (searchQuery) {
             const lowerLine = coloredLine.toLowerCase();
             const lowerQ = searchQuery.toLowerCase();
@@ -203,7 +256,6 @@ function renderListView(state) {
               coloredLine = result;
             }
           }
-          // Highlight log scan patterns
           for (let pi = 0; pi < patterns.length; pi++) {
             const p = patterns[pi];
             if (coloredLine.includes(p)) {
@@ -214,7 +266,6 @@ function renderListView(state) {
           bottomBuf.push(`  ${FG_GRAY}${coloredLine}${RESET}`);
         }
 
-        // Search prompt
         if (state.bottomSearchActive) {
           bottomBuf.push(`${BOLD}/${RESET}${state.bottomSearchQuery}${BOLD}_${RESET}`);
         }
@@ -223,18 +274,16 @@ function renderListView(state) {
   }
   const bottomHeight = bottomBuf.length;
 
-  // Build all display lines
-  const lines = [];
+  const lines: DisplayLine[] = [];
   let currentGroup = -1;
 
   for (let i = 0; i < state.flatList.length; i++) {
     const entry = state.flatList[i];
 
-    // Group header
     if (entry.groupIdx !== currentGroup) {
       currentGroup = entry.groupIdx;
       const group = state.groups[entry.groupIdx];
-      if (lines.length > 0) lines.push({ type: 'blank' });
+      if (lines.length > 0) lines.push({ type: 'blank', text: '' });
       const label = ` ${BOLD}${group.label}${RESET}`;
       if (group.error) {
         lines.push({ type: 'header', text: `${label}  ${FG_RED}(${group.error})${RESET}` });
@@ -253,13 +302,15 @@ function renderListView(state) {
     const restarting = state.restarting.has(sk);
     const stopping = state.stopping.has(sk);
     const starting = state.starting.has(sk);
-    const icon = statusIcon(st, rebuilding, restarting, stopping, starting);
-    const stext = statusText(st, rebuilding, restarting, stopping, starting);
+    const isWatching = state.watching.has(sk);
+    const isCascading = state.cascading.has(sk);
+    const icon = statusIcon(st, rebuilding || isCascading, restarting, stopping, starting);
+    const stext = statusText(st, rebuilding || isCascading, restarting, stopping, starting);
+    const watchIndicator = isWatching ? `${FG_CYAN}W${RESET}` : ' ';
     const name = entry.service.padEnd(24);
     const statusPadded = padVisible(stext, 22);
 
-    // CPU/MEM column
-    let cpuMemStr;
+    let cpuMemStr: string;
     const stats = state.containerStats ? state.containerStats.get(sk) : null;
     if (stats && st && st.state === 'running') {
       const cpu = stats.cpuPercent;
@@ -278,8 +329,7 @@ function renderListView(state) {
       cpuMemStr = padVisible(`${DIM}-${RESET}`, 16);
     }
 
-    // Ports column
-    let portsStr;
+    let portsStr: string;
     if (st && st.ports && st.ports.length > 0) {
       const portsText = st.ports.map(p => p.published).join(' ');
       portsStr = padVisible(`${DIM}${portsText}${RESET}`, 14);
@@ -303,18 +353,15 @@ function renderListView(state) {
 
     lines.push({
       type: 'service',
-      text: `${pointer}   ${icon} ${FG_WHITE}${name}${RESET} ${statusPadded} ${built} ${restarted}${countsStr}  ${cpuMemStr} ${portsStr}${endPointer}`,
+      text: `${pointer}  ${watchIndicator}${icon} ${FG_WHITE}${name}${RESET} ${statusPadded} ${built} ${restarted}${countsStr}  ${cpuMemStr} ${portsStr}${endPointer}`,
       flatIdx: i,
     });
   }
 
-  // Scrolling
   const availableRows = Math.max(3, rows - headerHeight - bottomHeight);
 
-  // Find line index of cursor
   const cursorLineIdx = lines.findIndex(l => l.type === 'service' && l.flatIdx === state.cursor);
 
-  // Adjust scroll offset
   if (cursorLineIdx < state.scrollOffset) {
     state.scrollOffset = cursorLineIdx;
   } else if (cursorLineIdx >= state.scrollOffset + availableRows) {
@@ -327,20 +374,18 @@ function renderListView(state) {
     buf.push(line.text || '');
   }
 
-  // Pad to push bottom panel to the bottom of the terminal
   const usedLines = buf.length + bottomHeight;
   const paddingNeeded = Math.max(0, rows - usedLines);
   for (let i = 0; i < paddingNeeded; i++) {
     buf.push('');
   }
 
-  // Bottom panel
   buf.push(...bottomBuf);
 
   return buf.join('\n');
 }
 
-function truncateLine(str, maxWidth) {
+export function truncateLine(str: string, maxWidth: number): string {
   let visPos = 0;
   let rawPos = 0;
   while (rawPos < str.length) {
@@ -359,7 +404,7 @@ function truncateLine(str, maxWidth) {
   return str;
 }
 
-function highlightSearchInLine(line, query) {
+export function highlightSearchInLine(line: string, query: string): string {
   if (!query) return line;
   const lowerLine = line.toLowerCase();
   const lowerQuery = query.toLowerCase();
@@ -378,14 +423,15 @@ function highlightSearchInLine(line, query) {
   return result;
 }
 
-function renderLogView(state) {
-  const { columns = 80, rows = 24 } = process.stdout;
-  const buf = [];
+export function renderLogView(state: AppState): string {
+  const columns = process.stdout.columns ?? 80;
+  const rows = process.stdout.rows ?? 24;
+  const buf: string[] = [];
 
   for (const line of LOGO) {
     buf.push(line);
   }
-  buf.push(` ${FG_GRAY}${'─'.repeat(Math.max(0, columns - 2))}${RESET}`);
+  buf.push(` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`);
   buf.push(` ${renderLegend({ logsScrollMode: true })}`);
 
   const entry = state.flatList[state.cursor];
@@ -398,7 +444,6 @@ function renderLogView(state) {
     : `${FG_YELLOW}paused ${DIM}line ${Math.max(1, totalLines - state.logScrollOffset)} / ${totalLines}${RESET}`;
   statusLine += `  ${scrollStatus}`;
 
-  // Show search match count
   if (state.logSearchQuery && state.logSearchMatches.length > 0) {
     statusLine += `  ${DIM}match ${state.logSearchMatchIdx + 1}/${state.logSearchMatches.length}${RESET}`;
   } else if (state.logSearchQuery && state.logSearchMatches.length === 0) {
@@ -406,12 +451,11 @@ function renderLogView(state) {
   }
   buf.push(statusLine);
 
-  // Reserve 1 row for search prompt if active
   const bottomReserved = state.logSearchActive ? 1 : 0;
   const headerHeight = buf.length;
   const availableRows = Math.max(1, rows - headerHeight - bottomReserved);
 
-  let endLine;
+  let endLine: number;
   if (state.logAutoScroll || state.logScrollOffset === 0) {
     endLine = totalLines;
   } else {
@@ -430,13 +474,11 @@ function renderLogView(state) {
     buf.push(truncateLine(line, columns));
   }
 
-  // Pad to fill screen
   const targetRows = rows - bottomReserved;
   for (let i = buf.length; i < targetRows; i++) {
     buf.push('');
   }
 
-  // Search prompt at the bottom
   if (state.logSearchActive) {
     buf.push(`${BOLD}/${RESET}${state.logSearchQuery}${BOLD}_${RESET}`);
   }
@@ -444,4 +486,41 @@ function renderLogView(state) {
   return buf.join('\n');
 }
 
-module.exports = { clearScreen, showCursor, renderListView, renderLogView };
+export function renderExecView(state: AppState): string {
+  const columns = process.stdout.columns ?? 80;
+  const rows = process.stdout.rows ?? 24;
+  const buf: string[] = [];
+
+  for (const line of LOGO) {
+    buf.push(line);
+  }
+  buf.push(` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`);
+  buf.push(` ${renderLegend({ execMode: true })}`);
+
+  const serviceName = state.execService || '???';
+  const runningIndicator = state.execChild ? `${FG_YELLOW}running${RESET}` : `${FG_GREEN}ready${RESET}`;
+  const cwdInfo = state.execCwd ? `  ${DIM}${state.execCwd}${RESET}` : '';
+  buf.push(` ${FG_CYAN}exec ${BOLD}${serviceName}${RESET}  ${runningIndicator}${cwdInfo}`);
+
+  const headerHeight = buf.length;
+  // Reserve 1 line for the prompt at the bottom
+  const availableRows = Math.max(1, rows - headerHeight - 1);
+
+  const totalLines = state.execOutputLines.length;
+  const startLine = Math.max(0, totalLines - availableRows);
+  for (let i = startLine; i < totalLines; i++) {
+    buf.push(truncateLine(`  ${state.execOutputLines[i]}`, columns));
+  }
+
+  // Pad empty space
+  const usedLines = buf.length + 1; // +1 for prompt
+  const paddingNeeded = Math.max(0, rows - usedLines);
+  for (let i = 0; i < paddingNeeded; i++) {
+    buf.push('');
+  }
+
+  // Command prompt
+  buf.push(`${FG_GREEN}$ ${RESET}${state.execInput}${BOLD}_${RESET}`);
+
+  return buf.join('\n');
+}

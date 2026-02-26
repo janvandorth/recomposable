@@ -45,11 +45,28 @@ recomposable
 - **Full log view** — scrollable full-screen log viewer with live auto-scroll and search (`/`, `n`/`N`)
 - **Start / Stop / Restart / Rebuild** — full container lifecycle management per service
 - **No cache mode** — toggle to force a full clean rebuild (`--no-cache` + `--force-recreate`), off by default
+- **Docker Compose Watch** — toggle `docker compose watch` per service, with live output in the log panel
+- **Dependency-aware rebuild** — rebuild a service then automatically restart all its transitive dependents in topological order
+- **Container exec** — run commands inside any container, inline in the bottom panel (`e`) or full-screen (`x`), with `cd` support and command history
 - **Vim keybindings** — navigate with `j`/`k`, `G`/`gg`, and more
 
 ## Full Log View
 
 ![recomposable full logs view](screenshots/logs-view.png)
+
+## Exec Mode
+
+Run commands inside any running container without leaving the TUI. Press `e` for inline exec in the bottom panel, or `x` for full-screen exec. `cd` works — the working directory is tracked across commands.
+
+![recomposable exec view](screenshots/exec-view.png)
+
+## Docker Compose Watch
+
+Press `w` to toggle `docker compose watch` for a service. A cyan `W` indicator appears next to watched services, and watch output streams to the inline log panel. Requires Docker Compose v2.22+.
+
+## Dependency-Aware Rebuild
+
+Press `d` to rebuild the selected service and then automatically restart all services that depend on it (transitively), in the correct topological order. Progress is shown step-by-step in the log panel. If the service has no dependents, falls back to a regular rebuild.
 
 ## Adding Compose Files
 
@@ -113,6 +130,10 @@ recomposable -f docker-compose.yml -f docker-compose.prod.yml
 | `s` | Start (if stopped) or restart (if running) |
 | `p` | Stop selected service |
 | `b` | Rebuild selected service (`up -d --build`) |
+| `d` | Dependency-aware rebuild (rebuild + restart all dependents) |
+| `w` | Toggle Docker Compose Watch for selected service |
+| `e` | Inline exec in bottom panel |
+| `x` | Full-screen exec mode |
 | `n` | Toggle no-cache mode (rebuild with `--no-cache` + `--force-recreate`) |
 | `f` / `Enter` | Full-screen log view for selected service |
 | `l` | Toggle inline log panel |
@@ -137,6 +158,17 @@ recomposable -f docker-compose.yml -f docker-compose.prod.yml
 | `Esc` / `f` | Exit log view |
 | `q` | Quit |
 
+### Exec mode (inline & full-screen)
+
+| Key | Action |
+|---|---|
+| Type | Enter commands |
+| `Enter` | Execute command |
+| `Up` / `Down` | Navigate command history |
+| `x` | Expand inline exec to full screen |
+| `Ctrl+C` | Kill running command (double to quit) |
+| `Esc` | Exit exec mode |
+
 ## Status Icons
 
 | Icon | Meaning |
@@ -145,6 +177,7 @@ recomposable -f docker-compose.yml -f docker-compose.prod.yml
 | Red circle | Running (unhealthy) |
 | Yellow circle | Rebuilding / Restarting / Starting / Stopping |
 | Gray circle | Stopped |
+| Cyan `W` | Docker Compose Watch active |
 
 ## Todo
 
