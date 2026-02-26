@@ -6,7 +6,7 @@ import { clearScreen, renderListView, renderLogView, renderExecView } from '../s
 import type { Killable } from '../src/lib/types';
 
 // --- Mock terminal dimensions ---
-const COLS = 150;
+const COLS = 128;
 const ROWS = 48;
 process.stdout.columns = COLS;
 process.stdout.rows = ROWS;
