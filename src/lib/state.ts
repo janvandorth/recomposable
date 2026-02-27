@@ -59,6 +59,14 @@ export function createState(config: Config): AppState {
     execChild: null,
     execOutputLines: [],
     execCwd: null,
+    showWorktreeColumn: false,
+    // Worktree switching
+    worktreeOverrides: new Map(),
+    // Worktree picker
+    worktreePickerActive: false,
+    worktreePickerEntries: [],
+    worktreePickerCursor: 0,
+    worktreePickerCurrentPath: null,
     config,
   };
 }
@@ -85,4 +93,12 @@ export function moveCursor(state: AppState, delta: number): void {
 
 export function selectedEntry(state: AppState): FlatEntry | null {
   return state.flatList[state.cursor] || null;
+}
+
+export function getEffectiveFile(state: AppState, file: string, service: string): string {
+  return state.worktreeOverrides.get(statusKey(file, service)) || file;
+}
+
+export function worktreeLabel(worktree: string | null): string {
+  return worktree || '';
 }

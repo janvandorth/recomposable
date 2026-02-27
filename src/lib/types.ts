@@ -13,7 +13,7 @@ export interface Config {
   composeFiles: string[];
   pollInterval: number;
   logTailLines: number;
-  logScanPatterns: string[];
+  logScanPatterns: (string | string[])[];
   logScanLines: number;
   logScanInterval: number;
   statsInterval: number;
@@ -39,6 +39,8 @@ export interface ContainerStatus {
   startedAt: string | null;
   id: string | null;
   ports: PortMapping[];
+  workingDir: string | null;
+  worktree: string | null;
 }
 
 export interface ContainerStats {
@@ -92,9 +94,16 @@ export interface FlatEntry {
   file: string;
 }
 
+// --- Git worktree ---
+
+export interface GitWorktree {
+  path: string;    // absolute worktree root
+  branch: string;  // branch name (e.g., "main", "fix-bug")
+}
+
 // --- Bottom log panel ---
 
-export type BottomLogAction = 'logs' | 'rebuilding' | 'restarting' | 'stopping' | 'starting' | 'started' | 'watching' | 'cascading' | 'exec' | 'build_failed' | 'restart_failed' | 'stop_failed' | 'start_failed';
+export type BottomLogAction = 'logs' | 'rebuilding' | 'restarting' | 'stopping' | 'starting' | 'started' | 'watching' | 'cascading' | 'exec' | 'build_failed' | 'restart_failed' | 'stop_failed' | 'start_failed' | 'switching' | 'switch_failed';
 
 // --- Dependency graph ---
 
@@ -179,6 +188,14 @@ export interface AppState {
   execChild: ChildProcess | null;
   execOutputLines: string[];
   execCwd: string | null;
+  showWorktreeColumn: boolean;
+  // Worktree switching
+  worktreeOverrides: Map<string, string>;  // statusKey(origFile, service) -> overrideFile
+  // Worktree picker
+  worktreePickerActive: boolean;
+  worktreePickerEntries: GitWorktree[];
+  worktreePickerCursor: number;
+  worktreePickerCurrentPath: string | null;
   config: Config;
   pollTimer?: ReturnType<typeof setInterval>;
   logScanTimer?: ReturnType<typeof setInterval>;
@@ -197,10 +214,11 @@ export interface LegendOptions {
   watchActive?: boolean;
   execMode?: boolean;
   execInline?: boolean;
+  worktreePickerActive?: boolean;
 }
 
 export interface DisplayLine {
-  type: 'header' | 'colheader' | 'blank' | 'service';
+  type: 'header' | 'blank' | 'service';
   text: string;
   flatIdx?: number;
 }
@@ -227,6 +245,9 @@ export interface DockerInspectEntry {
   Id?: string;
   State?: {
     StartedAt?: string;
+  };
+  Config?: {
+    Labels?: Record<string, string>;
   };
 }
 

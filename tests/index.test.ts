@@ -33,6 +33,9 @@ vi.mock('../src/lib/docker', () => ({
   watchService: vi.fn(() => mockChildProcess()),
   parseDependencyGraph: vi.fn(() => ({ dependsOn: new Map(), dependedBy: new Map() })),
   execInContainer: vi.fn(() => mockChildProcess()),
+  getGitRoot: vi.fn(() => '/mock/git/root'),
+  listGitWorktrees: vi.fn(() => []),
+  validateServiceInComposeFile: vi.fn(() => true),
 }));
 
 // Mock process.stdout.write to avoid terminal output during tests
@@ -1051,7 +1054,7 @@ describe('handleKeypress - exec keybinding', () => {
   it('e does nothing on stopped container', () => {
     const state = createTestState();
     const sk = statusKey(state.flatList[0].file, state.flatList[0].service);
-    state.statuses.set(sk, { state: 'exited', health: '', createdAt: null, startedAt: null, id: null, ports: [] });
+    state.statuses.set(sk, { state: 'exited', health: '', createdAt: null, startedAt: null, id: null, ports: [], workingDir: null, worktree: null });
     handleKeypress(state, 'e');
     expect(state.mode).toBe(MODE.LIST);
     expect(state.execActive).toBe(false);
@@ -1217,5 +1220,298 @@ describe('cleanup - new features', () => {
     cleanup(state);
     expect(kill).toHaveBeenCalledWith('SIGTERM');
     expect(state.execChild).toBeNull();
+  });
+});
+
+describe('detectMultipleWorktrees', () => {
+  let detectMultipleWorktrees: (state: AppState) => void;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    detectMultipleWorktrees = mod.detectMultipleWorktrees;
+  });
+
+  it('sets showWorktreeColumn true when 2+ distinct worktrees', () => {
+    const state = createTestState();
+    const sk1 = statusKey(state.groups[0].file, 'postgres');
+    const sk2 = statusKey(state.groups[1].file, 'api-gateway');
+    state.statuses.set(sk1, { state: 'running', health: '', createdAt: null, startedAt: null, id: '1', ports: [], workingDir: '/path/a', worktree: 'main' });
+    state.statuses.set(sk2, { state: 'running', health: '', createdAt: null, startedAt: null, id: '2', ports: [], workingDir: '/path/b', worktree: 'fix-bug' });
+    detectMultipleWorktrees(state);
+    expect(state.showWorktreeColumn).toBe(true);
+  });
+
+  it('sets showWorktreeColumn false when all same worktree', () => {
+    const state = createTestState();
+    const sk1 = statusKey(state.groups[0].file, 'postgres');
+    const sk2 = statusKey(state.groups[0].file, 'redis');
+    state.statuses.set(sk1, { state: 'running', health: '', createdAt: null, startedAt: null, id: '1', ports: [], workingDir: '/path/a', worktree: 'main' });
+    state.statuses.set(sk2, { state: 'running', health: '', createdAt: null, startedAt: null, id: '2', ports: [], workingDir: '/path/a', worktree: 'main' });
+    detectMultipleWorktrees(state);
+    expect(state.showWorktreeColumn).toBe(false);
+  });
+
+  it('ignores non-running containers', () => {
+    const state = createTestState();
+    const sk1 = statusKey(state.groups[0].file, 'postgres');
+    const sk2 = statusKey(state.groups[0].file, 'redis');
+    state.statuses.set(sk1, { state: 'running', health: '', createdAt: null, startedAt: null, id: '1', ports: [], workingDir: '/path/a', worktree: 'main' });
+    state.statuses.set(sk2, { state: 'exited', health: '', createdAt: null, startedAt: null, id: '2', ports: [], workingDir: '/path/b', worktree: 'fix-bug' });
+    detectMultipleWorktrees(state);
+    expect(state.showWorktreeColumn).toBe(false);
+  });
+});
+
+describe('handleKeypress - worktree picker', () => {
+  let handleKeypress: (state: AppState, key: string) => void;
+  let listGitWorktreesMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    handleKeypress = mod.handleKeypress;
+    const docker = await import('../src/lib/docker');
+    listGitWorktreesMock = docker.listGitWorktrees as ReturnType<typeof vi.fn>;
+  });
+
+  it('t opens worktree picker when worktrees exist', () => {
+    const state = createTestState();
+    listGitWorktreesMock.mockReturnValue([
+      { path: '/path/to/main', branch: 'main' },
+      { path: '/path/to/fix', branch: 'fix-bug' },
+    ]);
+    handleKeypress(state, 't');
+    expect(state.worktreePickerActive).toBe(true);
+    expect(state.worktreePickerEntries).toHaveLength(2);
+  });
+
+  it('t shows message when only one worktree', () => {
+    const state = createTestState();
+    listGitWorktreesMock.mockReturnValue([
+      { path: '/path/to/main', branch: 'main' },
+    ]);
+    handleKeypress(state, 't');
+    expect(state.worktreePickerActive).toBe(false);
+    const sk = statusKey(state.flatList[state.cursor].file, state.flatList[state.cursor].service);
+    const info = state.bottomLogLines.get(sk);
+    expect(info).toBeDefined();
+    expect(info!.action).toBe('switch_failed');
+  });
+
+  it('t does nothing when service is rebuilding', () => {
+    const state = createTestState();
+    const entry = state.flatList[state.cursor];
+    const sk = statusKey(entry.file, entry.service);
+    state.rebuilding.set(sk, createMockKillable());
+    listGitWorktreesMock.mockReturnValue([
+      { path: '/path/to/main', branch: 'main' },
+      { path: '/path/to/fix', branch: 'fix-bug' },
+    ]);
+    handleKeypress(state, 't');
+    expect(state.worktreePickerActive).toBe(false);
+  });
+
+  it('Esc cancels worktree picker', () => {
+    const state = createTestState();
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/path/to/main', branch: 'main' },
+      { path: '/path/to/fix', branch: 'fix-bug' },
+    ];
+    state.worktreePickerCursor = 1;
+    handleKeypress(state, '\x1b');
+    expect(state.worktreePickerActive).toBe(false);
+    expect(state.worktreePickerEntries).toHaveLength(0);
+    expect(state.worktreePickerCursor).toBe(0);
+  });
+
+  it('j moves picker cursor down', () => {
+    const state = createTestState();
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/a', branch: 'main' },
+      { path: '/b', branch: 'fix' },
+      { path: '/c', branch: 'feature' },
+    ];
+    state.worktreePickerCursor = 0;
+    handleKeypress(state, 'j');
+    expect(state.worktreePickerCursor).toBe(1);
+  });
+
+  it('k moves picker cursor up', () => {
+    const state = createTestState();
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/a', branch: 'main' },
+      { path: '/b', branch: 'fix' },
+    ];
+    state.worktreePickerCursor = 1;
+    handleKeypress(state, 'k');
+    expect(state.worktreePickerCursor).toBe(0);
+  });
+
+  it('j clamps at end of list', () => {
+    const state = createTestState();
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/a', branch: 'main' },
+      { path: '/b', branch: 'fix' },
+    ];
+    state.worktreePickerCursor = 1;
+    handleKeypress(state, 'j');
+    expect(state.worktreePickerCursor).toBe(1);
+  });
+
+  it('k clamps at start of list', () => {
+    const state = createTestState();
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/a', branch: 'main' },
+    ];
+    state.worktreePickerCursor = 0;
+    handleKeypress(state, 'k');
+    expect(state.worktreePickerCursor).toBe(0);
+  });
+
+  it('G jumps to last entry', () => {
+    const state = createTestState();
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/a', branch: 'main' },
+      { path: '/b', branch: 'fix' },
+      { path: '/c', branch: 'feature' },
+    ];
+    state.worktreePickerCursor = 0;
+    handleKeypress(state, 'G');
+    expect(state.worktreePickerCursor).toBe(2);
+  });
+
+  it('picker does not pass keys to list mode', () => {
+    const state = createTestState();
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/a', branch: 'main' },
+    ];
+    const originalCursor = state.cursor;
+    handleKeypress(state, 'b'); // should not trigger rebuild
+    expect(state.cursor).toBe(originalCursor);
+    expect(state.rebuilding.size).toBe(0);
+  });
+});
+
+describe('mapComposeFileToWorktree', () => {
+  let mapComposeFileToWorktree: (composeFile: string, targetPath: string) => string | null;
+  let getGitRootMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    mapComposeFileToWorktree = mod.mapComposeFileToWorktree;
+    const docker = await import('../src/lib/docker');
+    getGitRootMock = docker.getGitRoot as ReturnType<typeof vi.fn>;
+  });
+
+  it('returns null when getGitRoot returns null', () => {
+    getGitRootMock.mockReturnValue(null);
+    expect(mapComposeFileToWorktree('/some/file.yml', '/target')).toBeNull();
+  });
+
+  it('returns null when target file does not exist', () => {
+    getGitRootMock.mockReturnValue('/git/root');
+    // fs.accessSync will throw for non-existent files
+    expect(mapComposeFileToWorktree('/git/root/services/docker-compose.yml', '/target/worktree')).toBeNull();
+  });
+});
+
+describe('createInputHandler - worktree picker guard', () => {
+  let createInputHandler: (state: AppState) => (data: Buffer | string) => void;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    createInputHandler = mod.createInputHandler;
+  });
+
+  it('does not buffer g key when picker is active', () => {
+    const state = createTestState();
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/a', branch: 'main' },
+      { path: '/b', branch: 'fix' },
+    ];
+    const handler = createInputHandler(state);
+    const originalCursor = state.cursor;
+    // 'g' should be passed through to handleKeypress, not buffered for gg
+    handler('g');
+    // Since picker handles limited keys, g is ignored — cursor should not move
+    expect(state.cursor).toBe(originalCursor);
+  });
+});
+
+describe('doWorktreeSwitch - groups not modified', () => {
+  let doWorktreeSwitch: (state: AppState, target: import('../src/lib/types').GitWorktree) => void;
+  let validateMock: ReturnType<typeof vi.fn>;
+  let getGitRootMock: ReturnType<typeof vi.fn>;
+  let mapMock: (composeFile: string, targetPath: string) => string | null;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    doWorktreeSwitch = mod.doWorktreeSwitch;
+    const docker = await import('../src/lib/docker');
+    validateMock = docker.validateServiceInComposeFile as ReturnType<typeof vi.fn>;
+    getGitRootMock = docker.getGitRoot as ReturnType<typeof vi.fn>;
+  });
+
+  it('does not modify groups when switching worktree', () => {
+    const state = createTestState();
+    const originalGroups = JSON.stringify(state.groups.map(g => ({ file: g.file, label: g.label, services: [...g.services] })));
+    getGitRootMock.mockReturnValue('/mock/git/root');
+    validateMock.mockReturnValue(true);
+
+    // doWorktreeSwitch will fail at mapComposeFileToWorktree (file not found)
+    // but that's ok — we just verify groups aren't touched
+    doWorktreeSwitch(state, { path: '/nonexistent', branch: 'fix-bug' });
+    const afterGroups = JSON.stringify(state.groups.map(g => ({ file: g.file, label: g.label, services: [...g.services] })));
+    expect(afterGroups).toBe(originalGroups);
+  });
+
+  it('sets worktreeOverrides on switch_failed (file not found)', () => {
+    const state = createTestState();
+    getGitRootMock.mockReturnValue('/mock/git/root');
+    doWorktreeSwitch(state, { path: '/nonexistent', branch: 'fix-bug' });
+    // Override should NOT be set on failure
+    expect(state.worktreeOverrides.size).toBe(0);
+  });
+
+  it('preserves flatList structure after switch attempt', () => {
+    const state = createTestState();
+    const originalLen = state.flatList.length;
+    getGitRootMock.mockReturnValue('/mock/git/root');
+    doWorktreeSwitch(state, { path: '/nonexistent', branch: 'fix-bug' });
+    expect(state.flatList.length).toBe(originalLen);
+  });
+});
+
+describe('pollStatuses with worktree overrides', () => {
+  let pollStatuses: (state: AppState) => void;
+  let getStatusesMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    pollStatuses = mod.pollStatuses;
+    const docker = await import('../src/lib/docker');
+    getStatusesMock = docker.getStatuses as ReturnType<typeof vi.fn>;
+  });
+
+  it('polls override file for services with worktree overrides', () => {
+    const state = createTestState();
+    const entry = state.flatList[0];
+    const sk = statusKey(entry.file, entry.service);
+    const overrideFile = '/override/docker-compose.yml';
+    state.worktreeOverrides.set(sk, overrideFile);
+
+    getStatusesMock.mockReturnValue(new Map());
+    pollStatuses(state);
+
+    // Should have been called with both the original file and the override file
+    const calledFiles = getStatusesMock.mock.calls.map((c: unknown[]) => c[0]);
+    expect(calledFiles).toContain(overrideFile);
   });
 });

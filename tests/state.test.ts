@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createState, statusKey, buildFlatList, moveCursor, selectedEntry, MODE } from '../src/lib/state';
+import { createState, statusKey, buildFlatList, moveCursor, selectedEntry, MODE, worktreeLabel, getEffectiveFile } from '../src/lib/state';
 import { createTestConfig, createMockGroups } from './helpers';
 
 describe('MODE', () => {
@@ -184,5 +184,43 @@ describe('selectedEntry', () => {
     state.cursor = 99;
 
     expect(selectedEntry(state)).toBeNull();
+  });
+});
+
+describe('worktreeLabel', () => {
+  it('returns branch name as-is', () => {
+    expect(worktreeLabel('main')).toBe('main');
+  });
+
+  it('returns feature branch name', () => {
+    expect(worktreeLabel('fix-bug')).toBe('fix-bug');
+  });
+
+  it('returns empty string for null', () => {
+    expect(worktreeLabel(null)).toBe('');
+  });
+});
+
+describe('getEffectiveFile', () => {
+  it('returns original file when no override exists', () => {
+    const config = createTestConfig();
+    const state = createState(config);
+    expect(getEffectiveFile(state, '/path/to/compose.yml', 'web')).toBe('/path/to/compose.yml');
+  });
+
+  it('returns override file when override exists', () => {
+    const config = createTestConfig();
+    const state = createState(config);
+    const sk = statusKey('/path/to/compose.yml', 'web');
+    state.worktreeOverrides.set(sk, '/other/worktree/compose.yml');
+    expect(getEffectiveFile(state, '/path/to/compose.yml', 'web')).toBe('/other/worktree/compose.yml');
+  });
+
+  it('does not affect other services', () => {
+    const config = createTestConfig();
+    const state = createState(config);
+    const sk = statusKey('/path/to/compose.yml', 'web');
+    state.worktreeOverrides.set(sk, '/other/worktree/compose.yml');
+    expect(getEffectiveFile(state, '/path/to/compose.yml', 'api')).toBe('/path/to/compose.yml');
   });
 });

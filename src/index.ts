@@ -4,10 +4,10 @@
 import fs from 'fs';
 import path from 'path';
 import type { ChildProcess } from 'child_process';
-import { listServices, getStatuses, rebuildService, restartService, stopService, startService, tailLogs, fetchServiceLogs, getContainerId, tailContainerLogs, fetchContainerLogs, fetchContainerStats, parseStatsLine, isWatchAvailable, watchService, parseDependencyGraph, execInContainer } from './lib/docker';
-import { MODE, createState, statusKey, buildFlatList, moveCursor, selectedEntry } from './lib/state';
+import { listServices, getStatuses, rebuildService, restartService, stopService, startService, tailLogs, fetchServiceLogs, getContainerId, tailContainerLogs, fetchContainerLogs, fetchContainerStats, parseStatsLine, isWatchAvailable, watchService, parseDependencyGraph, execInContainer, getGitRoot, listGitWorktrees, validateServiceInComposeFile } from './lib/docker';
+import { MODE, createState, statusKey, buildFlatList, moveCursor, selectedEntry, getEffectiveFile } from './lib/state';
 import { clearScreen, showCursor, renderListView, renderLogView, renderExecView, CLEAR_EOL, CLEAR_EOS } from './lib/renderer';
-import type { Config, AppState, ServiceGroup, Killable, StatsHistory, CascadeStep, CascadeOperation } from './lib/types';
+import type { Config, AppState, ServiceGroup, Killable, StatsHistory, CascadeStep, CascadeOperation, GitWorktree } from './lib/types';
 
 // --- Module-level mutable state ---
 
@@ -38,7 +38,7 @@ export function loadConfig(): Config {
     composeFiles: [],
     pollInterval: 3000,
     logTailLines: 100,
-    logScanPatterns: ['WRN]', 'ERR]'],
+    logScanPatterns: [['WRN]', 'WARNING'], ['ERR]', 'ERROR']],
     logScanLines: 1000,
     logScanInterval: 10000,
     statsInterval: 5000,
@@ -57,7 +57,9 @@ export function loadConfig(): Config {
       if (Array.isArray(raw.composeFiles) && raw.composeFiles.every((f: unknown) => typeof f === 'string')) {
         defaults.composeFiles = raw.composeFiles;
       }
-      if (Array.isArray(raw.logScanPatterns) && raw.logScanPatterns.every((p: unknown) => typeof p === 'string')) {
+      if (Array.isArray(raw.logScanPatterns) && raw.logScanPatterns.every((p: unknown) =>
+        typeof p === 'string' || (Array.isArray(p) && p.length > 0 && p.every((s: unknown) => typeof s === 'string'))
+      )) {
         defaults.logScanPatterns = raw.logScanPatterns;
       }
       const numericFields: Array<{ key: keyof Config; min: number; max: number }> = [
@@ -123,13 +125,39 @@ export function discoverServices(config: Config): ServiceGroup[] {
 // --- Status Polling ---
 
 export function pollStatuses(state: AppState): void {
+  // Collect services by their effective file (may differ from group file due to worktree overrides)
+  const fileToServices = new Map<string, Array<{ sk: string; service: string }>>();
   for (const group of state.groups) {
     if (group.error) continue;
-    const statuses = getStatuses(group.file);
-    for (const [svc, st] of statuses) {
-      state.statuses.set(statusKey(group.file, svc), st);
+    for (const service of group.services) {
+      const sk = statusKey(group.file, service);
+      const file = getEffectiveFile(state, group.file, service);
+      if (!fileToServices.has(file)) fileToServices.set(file, []);
+      fileToServices.get(file)!.push({ sk, service });
     }
   }
+  for (const [file, services] of fileToServices) {
+    const statuses = getStatuses(file);
+    const serviceSet = new Set(services.map(s => s.service));
+    for (const [svc, st] of statuses) {
+      if (serviceSet.has(svc)) {
+        // Store under the original statusKey (group.file based)
+        const match = services.find(s => s.service === svc);
+        if (match) state.statuses.set(match.sk, st);
+      }
+    }
+  }
+  detectMultipleWorktrees(state);
+}
+
+export function detectMultipleWorktrees(state: AppState): void {
+  const worktrees = new Set<string>();
+  for (const st of state.statuses.values()) {
+    if (st.state === 'running' && st.worktree) {
+      worktrees.add(st.worktree);
+    }
+  }
+  state.showWorktreeColumn = worktrees.size > 1;
 }
 
 // --- Log Pattern Scanning ---
@@ -162,14 +190,18 @@ export function pollLogCounts(state: AppState): void {
     child.stderr!.on('data', (d: Buffer) => { output += d.toString(); });
     child.on('close', () => {
       const counts = new Map<string, number>();
-      for (const pattern of scanPatterns) {
+      for (const entry of scanPatterns) {
+        const group = Array.isArray(entry) ? entry : [entry];
+        const key = group[0];
         let count = 0;
-        let idx = 0;
-        while ((idx = output.indexOf(pattern, idx)) !== -1) {
-          count++;
-          idx += pattern.length;
+        for (const pattern of group) {
+          let idx = 0;
+          while ((idx = output.indexOf(pattern, idx)) !== -1) {
+            count++;
+            idx += pattern.length;
+          }
         }
-        counts.set(pattern, count);
+        counts.set(key, count);
       }
       state.logCounts.set(sk, counts);
       remaining--;
@@ -336,9 +368,10 @@ export function updateSelectedLogs(state: AppState): void {
 
   state.bottomLogLines.set(sk, { action: 'logs', service: entry.service, lines: [] });
 
+  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
   moduleState.logFetchTimer = setTimeout(() => {
     moduleState.logFetchTimer = null;
-    startBottomLogTail(state, sk, entry.file, entry.service);
+    startBottomLogTail(state, sk, effectiveFile, entry.service);
   }, 500);
 }
 
@@ -380,12 +413,14 @@ export function doRebuild(state: AppState): void {
   const sk = statusKey(entry.file, entry.service);
   if (state.rebuilding.has(sk)) return;
 
+  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+
   if (state.bottomLogTails.has(sk)) {
     state.bottomLogTails.get(sk)!.kill('SIGTERM');
     state.bottomLogTails.delete(sk);
   }
 
-  const child = rebuildService(entry.file, entry.service, { noCache: state.noCache, noDeps: state.noDeps });
+  const child = rebuildService(effectiveFile, entry.service, { noCache: state.noCache, noDeps: state.noDeps });
   state.rebuilding.set(sk, child as Killable);
 
   state.bottomLogLines.set(sk, { action: 'rebuilding', service: entry.service, lines: [] });
@@ -429,7 +464,7 @@ export function doRebuild(state: AppState): void {
       if (state.logBuildKey !== sk) info.lines = [];
     }
 
-    startBottomLogTail(state, sk, entry.file, entry.service);
+    startBottomLogTail(state, sk, effectiveFile, entry.service);
     if (state.mode === MODE.LIST) render(state);
   });
 }
@@ -441,12 +476,14 @@ export function doRestart(state: AppState): void {
   const sk = statusKey(entry.file, entry.service);
   if (state.restarting.has(sk) || state.rebuilding.has(sk)) return;
 
+  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+
   if (state.bottomLogTails.has(sk)) {
     state.bottomLogTails.get(sk)!.kill('SIGTERM');
     state.bottomLogTails.delete(sk);
   }
 
-  const child = restartService(entry.file, entry.service);
+  const child = restartService(effectiveFile, entry.service);
   state.restarting.set(sk, child as Killable);
 
   state.bottomLogLines.set(sk, { action: 'restarting', service: entry.service, lines: [] });
@@ -470,7 +507,7 @@ export function doRestart(state: AppState): void {
       info.lines = [];
     }
 
-    startBottomLogTail(state, sk, entry.file, entry.service);
+    startBottomLogTail(state, sk, effectiveFile, entry.service);
     if (state.mode === MODE.LIST) render(state);
   });
 }
@@ -490,7 +527,8 @@ export function doStop(state: AppState): void {
     state.bottomLogTails.delete(sk);
   }
 
-  const child = stopService(entry.file, entry.service);
+  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+  const child = stopService(effectiveFile, entry.service);
   state.stopping.set(sk, child as Killable);
   state.bottomLogLines.set(sk, { action: 'stopping', service: entry.service, lines: [] });
   render(state);
@@ -518,7 +556,8 @@ export function doStart(state: AppState): void {
   const st = state.statuses.get(sk);
   if (st && st.state === 'running') return;
 
-  const child = startService(entry.file, entry.service);
+  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+  const child = startService(effectiveFile, entry.service);
   state.starting.set(sk, child as Killable);
   state.bottomLogLines.set(sk, { action: 'starting', service: entry.service, lines: [] });
   render(state);
@@ -539,9 +578,178 @@ export function doStart(state: AppState): void {
       info.lines = [];
     }
 
-    startBottomLogTail(state, sk, entry.file, entry.service);
+    startBottomLogTail(state, sk, effectiveFile, entry.service);
     if (state.mode === MODE.LIST) render(state);
   });
+}
+
+// --- Worktree Switching ---
+
+export function mapComposeFileToWorktree(composeFile: string, targetWorktreePath: string): string | null {
+  const resolved = path.resolve(composeFile);
+  const dir = path.dirname(resolved);
+  const gitRoot = getGitRoot(dir);
+  if (!gitRoot) return null;
+
+  const relPath = path.relative(gitRoot, resolved);
+  const newFile = path.join(targetWorktreePath, relPath);
+  try {
+    fs.accessSync(newFile);
+    return newFile;
+  } catch {
+    return null;
+  }
+}
+
+export function openWorktreePicker(state: AppState): void {
+  const entry = selectedEntry(state);
+  if (!entry) return;
+
+  const sk = statusKey(entry.file, entry.service);
+  if (state.rebuilding.has(sk) || state.restarting.has(sk) || state.stopping.has(sk) || state.starting.has(sk) || state.cascading.has(sk)) return;
+
+  const composeDir = path.dirname(path.resolve(entry.file));
+  const worktrees = listGitWorktrees(composeDir);
+
+  if (worktrees.length <= 1) {
+    state.bottomLogLines.set(sk, { action: 'switch_failed', service: entry.service, lines: ['no other worktrees available — use `git worktree add` to create one'] });
+    state.showBottomLogs = true;
+    render(state);
+    return;
+  }
+
+  const gitRoot = getGitRoot(composeDir);
+
+  state.worktreePickerEntries = worktrees;
+  state.worktreePickerActive = true;
+  state.worktreePickerCurrentPath = gitRoot;
+
+  // Pre-select first non-current worktree
+  const currentIdx = gitRoot ? worktrees.findIndex(w => w.path === gitRoot) : -1;
+  const firstOther = worktrees.findIndex((_, i) => i !== currentIdx);
+  state.worktreePickerCursor = firstOther >= 0 ? firstOther : 0;
+
+  state.showBottomLogs = true;
+  render(state);
+}
+
+export function doWorktreeSwitch(state: AppState, targetWorktree: GitWorktree): void {
+  const entry = selectedEntry(state);
+  if (!entry) return;
+
+  const service = entry.service;
+  const sk = statusKey(entry.file, service);
+
+  // Close picker
+  state.worktreePickerActive = false;
+  state.worktreePickerEntries = [];
+  state.worktreePickerCursor = 0;
+
+  // Compute new file from the original group file
+  const newFile = mapComposeFileToWorktree(entry.file, targetWorktree.path);
+  if (!newFile) {
+    state.bottomLogLines.set(sk, {
+      action: 'switch_failed', service,
+      lines: [`compose file not found in worktree "${targetWorktree.branch}" (${targetWorktree.path})`],
+    });
+    render(state);
+    return;
+  }
+
+  // If target is the same as current effective file, nothing to do
+  const currentEffective = getEffectiveFile(state, entry.file, service);
+  if (newFile === currentEffective) {
+    render(state);
+    return;
+  }
+
+  // Validate service exists in target compose file
+  if (!validateServiceInComposeFile(newFile, service)) {
+    state.bottomLogLines.set(sk, {
+      action: 'switch_failed', service,
+      lines: [`service "${service}" not found in ${path.basename(newFile)} on branch "${targetWorktree.branch}"`],
+    });
+    render(state);
+    return;
+  }
+
+  // Show switching progress
+  state.bottomLogLines.set(sk, { action: 'switching', service, lines: [`switching to worktree "${targetWorktree.branch}"...`] });
+  render(state);
+
+  const performSwitch = (): void => {
+    // Store the worktree override (or remove if switching back to original)
+    if (newFile === entry.file) {
+      state.worktreeOverrides.delete(sk);
+    } else {
+      state.worktreeOverrides.set(sk, newFile);
+    }
+
+    // Update bottomLogLines to show rebuild
+    state.bottomLogLines.set(sk, { action: 'switching', service, lines: [`rebuilding in worktree "${targetWorktree.branch}"...`] });
+
+    // Rebuild in new worktree
+    const child = rebuildService(newFile, service, { noCache: state.noCache, noDeps: state.noDeps });
+    state.rebuilding.set(sk, child as Killable);
+
+    let lineBuf = '';
+    const onData = (data: Buffer): void => {
+      const info = state.bottomLogLines.get(sk);
+      if (!info) return;
+      lineBuf += data.toString();
+      const parts = lineBuf.split(/\r?\n|\r/);
+      lineBuf = parts.pop()!;
+      const newLines = parts.filter(l => l.trim().length > 0).map(stripAnsi).filter(Boolean);
+      if (newLines.length === 0) return;
+      info.lines.push(...newLines);
+      if (state.mode === MODE.LIST) throttledRender(state);
+    };
+
+    child.stdout!.on('data', onData);
+    child.stderr!.on('data', onData);
+    render(state);
+
+    child.on('close', (code: number | null) => {
+      state.rebuilding.delete(sk);
+      state.containerStatsHistory.delete(sk);
+      state.containerStats.delete(sk);
+      pollStatuses(state);
+
+      const info = state.bottomLogLines.get(sk);
+      if (code !== 0 && code !== null) {
+        if (info) info.action = 'build_failed';
+        if (state.mode === MODE.LIST) render(state);
+        return;
+      }
+
+      if (info) {
+        info.action = 'started';
+        info.lines = [];
+      }
+
+      startBottomLogTail(state, sk, newFile, service);
+      if (state.mode === MODE.LIST) render(state);
+    });
+  };
+
+  // If service is running, stop it first (using current effective file)
+  const st = state.statuses.get(sk);
+  if (st && st.state === 'running') {
+    if (state.bottomLogTails.has(sk)) {
+      state.bottomLogTails.get(sk)!.kill('SIGTERM');
+      state.bottomLogTails.delete(sk);
+    }
+    const stopChild = stopService(currentEffective, service);
+    state.stopping.set(sk, stopChild as Killable);
+    render(state);
+
+    stopChild.on('close', () => {
+      state.stopping.delete(sk);
+      performSwitch();
+    });
+  } else {
+    performSwitch();
+  }
 }
 
 // --- Watch ---
@@ -575,7 +783,8 @@ export function doWatch(state: AppState): void {
     return;
   }
 
-  const child = watchService(entry.file, entry.service);
+  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+  const child = watchService(effectiveFile, entry.service);
   state.watching.set(sk, child as Killable);
   state.bottomLogLines.set(sk, { action: 'watching', service: entry.service, lines: [] });
   state.showBottomLogs = true;
@@ -678,9 +887,20 @@ export function doCascadeRebuild(state: AppState): void {
   const sk = statusKey(entry.file, entry.service);
   if (state.rebuilding.has(sk) || state.cascading.has(sk)) return;
 
-  const graph = state.depGraphs.get(entry.file);
+  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+  let graph = state.depGraphs.get(effectiveFile);
   if (!graph) {
-    // No graph available, fall back to regular rebuild
+    // Try to parse dep graph for the effective file (may differ from original)
+    try {
+      graph = parseDependencyGraph(effectiveFile);
+      state.depGraphs.set(effectiveFile, graph);
+    } catch {
+      // No graph available, fall back to regular rebuild
+      doRebuild(state);
+      return;
+    }
+  }
+  if (!graph) {
     doRebuild(state);
     return;
   }
@@ -705,7 +925,7 @@ export function doCascadeRebuild(state: AppState): void {
   state.bottomLogLines.set(sk, { action: 'cascading', service: entry.service, lines: [] });
   state.showBottomLogs = true;
 
-  executeCascadeStep(state, entry.file, sk, cascade);
+  executeCascadeStep(state, effectiveFile, sk, cascade);
   render(state);
 }
 
@@ -974,7 +1194,8 @@ export function enterLogs(state: AppState): void {
   } else {
     state.logBuildKey = null;
 
-    const child = tailLogs(entry.file, entry.service, 200);
+    const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+    const child = tailLogs(effectiveFile, entry.service, 200);
     state.logChild = child;
 
     let lineBuf = '';
@@ -1045,7 +1266,8 @@ export function loadMoreLogHistory(state: AppState): void {
   state.logHistoryLoading = true;
   const snapshotLen = state.logLines.length;
 
-  const child = fetchServiceLogs(entry.file, entry.service, nextTail);
+  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+  const child = fetchServiceLogs(effectiveFile, entry.service, nextTail);
   state.logHistoryChild = child;
 
   let output = '';
@@ -1154,7 +1376,8 @@ export function executeBottomSearch(state: AppState): void {
   state.bottomSearchTotalMatches = 0;
   render(state);
 
-  const child = fetchServiceLogs(entry.file, entry.service, 'all');
+  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+  const child = fetchServiceLogs(effectiveFile, entry.service, 'all');
   state.bottomSearchChild = child;
 
   let output = '';
@@ -1375,6 +1598,30 @@ export function handleKeypress(state: AppState, key: string): void {
     return;
   }
 
+  // LIST mode - worktree picker
+  if (state.worktreePickerActive) {
+    if (key === '\x1b') {
+      state.worktreePickerActive = false;
+      state.worktreePickerEntries = [];
+      state.worktreePickerCursor = 0;
+      state.worktreePickerCurrentPath = null;
+      render(state);
+    } else if (key === '\r') {
+      const target = state.worktreePickerEntries[state.worktreePickerCursor];
+      if (target) doWorktreeSwitch(state, target);
+    } else if (key === 'j' || key === '\x1b[B') {
+      state.worktreePickerCursor = Math.min(state.worktreePickerEntries.length - 1, state.worktreePickerCursor + 1);
+      render(state);
+    } else if (key === 'k' || key === '\x1b[A') {
+      state.worktreePickerCursor = Math.max(0, state.worktreePickerCursor - 1);
+      render(state);
+    } else if (key === 'G') {
+      state.worktreePickerCursor = state.worktreePickerEntries.length - 1;
+      render(state);
+    }
+    return;
+  }
+
   // LIST mode - inline exec input
   if (state.execActive) {
     if (key === '\x1b') {
@@ -1508,6 +1755,9 @@ export function handleKeypress(state: AppState, key: string): void {
       state.showBottomLogs = !state.showBottomLogs;
       render(state);
       break;
+    case 't':
+      openWorktreePicker(state);
+      break;
     case 'q':
       cleanup(state);
       process.exit(0);
@@ -1569,7 +1819,7 @@ export function createInputHandler(state: AppState): (data: Buffer | string) => 
       const ch = buf[0];
       buf = buf.slice(1);
 
-      if (state.logSearchActive || state.bottomSearchActive || state.mode === MODE.EXEC || state.execActive) {
+      if (state.logSearchActive || state.bottomSearchActive || state.worktreePickerActive || state.mode === MODE.EXEC || state.execActive) {
         handleKeypress(state, ch);
         continue;
       }
@@ -1671,7 +1921,7 @@ export function cleanup(state: AppState): void {
   if (state.statsTimer) {
     clearInterval(state.statsTimer);
   }
-  process.stdout.write('\x1b[r' + showCursor() + '\x1b[0m');
+  process.stdout.write('\x1b[r' + showCursor() + '\x1b[0m\x1b[?1049l');
 }
 
 // Expose for testing
@@ -1686,6 +1936,8 @@ export function _setModuleState(ms: ModuleState): void {
 // --- Main ---
 
 function main(): void {
+  // Enter alternate screen buffer so pre-launch output (e.g. npx install) is hidden
+  process.stdout.write('\x1b[?1049h');
   const config = loadConfig();
   const state = createState(config);
 

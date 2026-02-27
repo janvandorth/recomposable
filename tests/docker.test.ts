@@ -189,6 +189,42 @@ describe('getStatuses (mocked)', () => {
     expect(status!.ports).toEqual([{ published: 8080, target: 80 }]);
   });
 
+  it('extracts workingDir from inspect labels and resolves worktree', async () => {
+    const data = [
+      { Service: 'web', State: 'running', Health: '', ID: 'abc123', Publishers: [] },
+    ];
+    execFileSyncMock
+      .mockReturnValueOnce(JSON.stringify(data))
+      .mockReturnValueOnce(JSON.stringify([{
+        Id: 'abc123full',
+        State: { StartedAt: '2024-01-01T10:00:00Z' },
+        Config: { Labels: { 'com.docker.compose.project.working_dir': '/home/user/project' } },
+      }]))
+      .mockReturnValueOnce('main\n');
+
+    const { getStatuses } = await import('../src/lib/docker');
+    const result = getStatuses('/path/to/compose.yml');
+    expect(result.get('web')!.workingDir).toBe('/home/user/project');
+    expect(result.get('web')!.worktree).toBe('main');
+  });
+
+  it('sets workingDir and worktree to null when no labels', async () => {
+    const data = [
+      { Service: 'web', State: 'running', Health: '', ID: 'abc123', Publishers: [] },
+    ];
+    execFileSyncMock
+      .mockReturnValueOnce(JSON.stringify(data))
+      .mockReturnValueOnce(JSON.stringify([{
+        Id: 'abc123full',
+        State: { StartedAt: '2024-01-01T10:00:00Z' },
+      }]));
+
+    const { getStatuses } = await import('../src/lib/docker');
+    const result = getStatuses('/path/to/compose.yml');
+    expect(result.get('web')!.workingDir).toBeNull();
+    expect(result.get('web')!.worktree).toBeNull();
+  });
+
   it('parses NDJSON format', async () => {
     const line1 = JSON.stringify({ Service: 'web', State: 'running', Health: '', ID: 'abc', Publishers: [] });
     const line2 = JSON.stringify({ Service: 'api', State: 'exited', Health: '', ID: 'def', Publishers: [] });
@@ -339,5 +375,161 @@ describe('getContainerId (mocked)', () => {
     execFileSyncMock.mockImplementation(() => { throw new Error('fail'); });
     const { getContainerId } = await import('../src/lib/docker');
     expect(getContainerId('/path/to/compose.yml', 'web')).toBeNull();
+  });
+});
+
+describe('getGitRoot (mocked)', () => {
+  let execFileSyncMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    execFileSyncMock = vi.fn();
+    vi.doMock('child_process', () => ({
+      execFileSync: execFileSyncMock,
+      spawn: vi.fn(),
+    }));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns trimmed git root path', async () => {
+    execFileSyncMock.mockReturnValue('/home/user/project\n');
+    const { getGitRoot } = await import('../src/lib/docker');
+    expect(getGitRoot('/home/user/project/src')).toBe('/home/user/project');
+  });
+
+  it('returns null on error', async () => {
+    execFileSyncMock.mockImplementation(() => { throw new Error('not a git repo'); });
+    const { getGitRoot } = await import('../src/lib/docker');
+    expect(getGitRoot('/tmp/no-repo')).toBeNull();
+  });
+
+  it('returns null on empty output', async () => {
+    execFileSyncMock.mockReturnValue('');
+    const { getGitRoot } = await import('../src/lib/docker');
+    expect(getGitRoot('/tmp')).toBeNull();
+  });
+});
+
+describe('listGitWorktrees (mocked)', () => {
+  let execFileSyncMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    execFileSyncMock = vi.fn();
+    vi.doMock('child_process', () => ({
+      execFileSync: execFileSyncMock,
+      spawn: vi.fn(),
+    }));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('parses porcelain output with multiple worktrees', async () => {
+    const porcelain = [
+      'worktree /home/user/project',
+      'HEAD abc123',
+      'branch refs/heads/main',
+      '',
+      'worktree /home/user/project-fix',
+      'HEAD def456',
+      'branch refs/heads/fix-bug',
+      '',
+    ].join('\n');
+    execFileSyncMock.mockReturnValue(porcelain);
+    const { listGitWorktrees } = await import('../src/lib/docker');
+    const result = listGitWorktrees('/home/user/project');
+    expect(result).toEqual([
+      { path: '/home/user/project', branch: 'main' },
+      { path: '/home/user/project-fix', branch: 'fix-bug' },
+    ]);
+  });
+
+  it('filters out bare repos', async () => {
+    const porcelain = [
+      'worktree /home/user/project.git',
+      'HEAD abc123',
+      'bare',
+      '',
+      'worktree /home/user/project',
+      'HEAD def456',
+      'branch refs/heads/main',
+      '',
+    ].join('\n');
+    execFileSyncMock.mockReturnValue(porcelain);
+    const { listGitWorktrees } = await import('../src/lib/docker');
+    const result = listGitWorktrees('/home/user/project');
+    expect(result).toEqual([
+      { path: '/home/user/project', branch: 'main' },
+    ]);
+  });
+
+  it('returns empty array on error', async () => {
+    execFileSyncMock.mockImplementation(() => { throw new Error('fail'); });
+    const { listGitWorktrees } = await import('../src/lib/docker');
+    expect(listGitWorktrees('/tmp')).toEqual([]);
+  });
+
+  it('returns empty array for empty output', async () => {
+    execFileSyncMock.mockReturnValue('');
+    const { listGitWorktrees } = await import('../src/lib/docker');
+    expect(listGitWorktrees('/tmp')).toEqual([]);
+  });
+
+  it('skips blocks without branch line', async () => {
+    const porcelain = [
+      'worktree /home/user/project',
+      'HEAD abc123 (detached)',
+      '',
+      'worktree /home/user/project-fix',
+      'HEAD def456',
+      'branch refs/heads/fix-bug',
+      '',
+    ].join('\n');
+    execFileSyncMock.mockReturnValue(porcelain);
+    const { listGitWorktrees } = await import('../src/lib/docker');
+    const result = listGitWorktrees('/home/user/project');
+    expect(result).toEqual([
+      { path: '/home/user/project-fix', branch: 'fix-bug' },
+    ]);
+  });
+});
+
+describe('validateServiceInComposeFile (mocked)', () => {
+  let execFileSyncMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    execFileSyncMock = vi.fn();
+    vi.doMock('child_process', () => ({
+      execFileSync: execFileSyncMock,
+      spawn: vi.fn(),
+    }));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns true when service exists', async () => {
+    execFileSyncMock.mockReturnValue('web\napi\nworker\n');
+    const { validateServiceInComposeFile } = await import('../src/lib/docker');
+    expect(validateServiceInComposeFile('/path/to/compose.yml', 'api')).toBe(true);
+  });
+
+  it('returns false when service does not exist', async () => {
+    execFileSyncMock.mockReturnValue('web\napi\nworker\n');
+    const { validateServiceInComposeFile } = await import('../src/lib/docker');
+    expect(validateServiceInComposeFile('/path/to/compose.yml', 'missing')).toBe(false);
+  });
+
+  it('returns false on error', async () => {
+    execFileSyncMock.mockImplementation(() => { throw new Error('fail'); });
+    const { validateServiceInComposeFile } = await import('../src/lib/docker');
+    expect(validateServiceInComposeFile('/path/to/compose.yml', 'web')).toBe(false);
   });
 });

@@ -294,8 +294,8 @@ describe('renderListView', () => {
     const state = createTestState();
     state.cursor = 0;
     const output = renderListView(state);
-    // Cursor row should contain REVERSE escape
-    expect(output).toContain('\x1b[7m');
+    // Cursor row should contain BG_HIGHLIGHT for full-row highlight
+    expect(output).toContain('\x1b[48;5;237m');
   });
 
   it('shows CPU/MEM for running services with stats', () => {
@@ -404,6 +404,25 @@ describe('renderListView', () => {
     expect(text).toContain('searching "error"...');
   });
 
+  it('shows WORKTREE column when showWorktreeColumn is true', () => {
+    const state = createTestState();
+    state.showWorktreeColumn = true;
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.statuses.set(sk, createMockStatus({ worktree: 'fix-bug' }));
+    const output = renderListView(state);
+    const text = strip(output);
+    expect(text).toContain('WORKTREE');
+    expect(text).toContain('fix-bug');
+  });
+
+  it('hides WORKTREE column when showWorktreeColumn is false', () => {
+    const state = createTestState();
+    state.showWorktreeColumn = false;
+    const output = renderListView(state);
+    const text = strip(output);
+    expect(text).not.toContain('WORKTREE');
+  });
+
   it('shows rebuilding status for service', () => {
     const state = createTestState();
     const sk = statusKey(state.groups[0].file, 'postgres');
@@ -484,6 +503,50 @@ describe('renderListView', () => {
     const output = renderListView(state);
     // The line should start with gray (90m)
     expect(output).toContain('\x1b[90m2024-01-01 INF]');
+  });
+
+  it('shows service name always in white regardless of worktree', () => {
+    const state = createTestState();
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.statuses.set(sk, createMockStatus({ worktree: 'fix-bug' }));
+    const output = renderListView(state);
+    // Service name should always use white (37m)
+    expect(output).toContain('\x1b[37mpostgres');
+  });
+
+  it('shows worktree column in yellow when worktree is not main', () => {
+    const state = createTestState();
+    state.showWorktreeColumn = true;
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.statuses.set(sk, createMockStatus({ worktree: 'fix-bug' }));
+    const output = renderListView(state);
+    // Worktree column should use yellow (33m) for non-main
+    expect(output).toContain('\x1b[33mfix-bug');
+  });
+
+  it('shows worktree column dimmed when worktree is main', () => {
+    const state = createTestState();
+    state.showWorktreeColumn = true;
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.statuses.set(sk, createMockStatus({ worktree: 'main' }));
+    const output = renderListView(state);
+    // Worktree column should use DIM (2m) for main
+    expect(output).toContain('\x1b[2mmain');
+  });
+
+  it('highlights entire selected row with background color', () => {
+    const state = createTestState();
+    state.cursor = 0;
+    const output = renderListView(state);
+    const lines = output.split('\n');
+    // Find the line containing postgres (cursor=0, first service)
+    const pgLine = lines.find(l => strip(l).includes('postgres'));
+    expect(pgLine).toBeDefined();
+    // Should start with BG_HIGHLIGHT and end with RESET
+    expect(pgLine).toContain('\x1b[48;5;237m');
+    // The background should be re-applied after resets within the row
+    const bgCount = (pgLine!.match(/\x1b\[48;5;237m/g) || []).length;
+    expect(bgCount).toBeGreaterThan(1);
   });
 });
 
@@ -816,5 +879,129 @@ describe('renderLogView', () => {
     // Should not contain yellow or red color codes wrapping the line
     expect(output).not.toContain('\x1b[33m2024-01-01 INF]');
     expect(output).not.toContain('\x1b[31m2024-01-01 INF]');
+  });
+});
+
+describe('renderLegend - worktree picker', () => {
+  it('shows picker keys when worktreePickerActive', () => {
+    const result = strip(renderLegend({ worktreePickerActive: true }));
+    expect(result).toContain('[Esc] cancel');
+    expect(result).toContain('[Enter] switch');
+    expect(result).toContain('[j/k] navigate');
+    expect(result).not.toContain('Re[B]uild');
+  });
+
+  it('shows [T]ree in default list legend', () => {
+    const result = strip(renderLegend());
+    expect(result).toContain('Switch [t]ree');
+  });
+});
+
+describe('renderListView - worktree picker overlay', () => {
+  let originalColumns: number | undefined;
+  let originalRows: number | undefined;
+
+  beforeEach(() => {
+    originalColumns = process.stdout.columns;
+    originalRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, 'columns', { value: 120, writable: true, configurable: true });
+    Object.defineProperty(process.stdout, 'rows', { value: 40, writable: true, configurable: true });
+  });
+
+  afterEach(() => {
+    if (originalColumns !== undefined) {
+      Object.defineProperty(process.stdout, 'columns', { value: originalColumns, writable: true, configurable: true });
+    }
+    if (originalRows !== undefined) {
+      Object.defineProperty(process.stdout, 'rows', { value: originalRows, writable: true, configurable: true });
+    }
+  });
+
+  it('shows picker UI when worktreePickerActive', () => {
+    const state = createTestState();
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/home/user/main', branch: 'main' },
+      { path: '/home/user/fix', branch: 'fix-bug' },
+    ];
+    state.worktreePickerCursor = 1;
+    state.worktreePickerCurrentPath = '/home/user/main';
+    const output = strip(renderListView(state));
+    expect(output).toContain('switch worktree');
+    expect(output).toContain('main');
+    expect(output).toContain('fix-bug');
+    expect(output).toContain('(current)');
+  });
+
+  it('shows picker legend when picker is active', () => {
+    const state = createTestState();
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/a', branch: 'main' },
+    ];
+    state.worktreePickerCursor = 0;
+    const output = strip(renderListView(state));
+    expect(output).toContain('[Esc] cancel');
+    expect(output).toContain('[Enter] switch');
+  });
+
+  it('shows service name in picker header', () => {
+    const state = createTestState();
+    state.cursor = 2; // 'api-gateway'
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/a', branch: 'main' },
+    ];
+    state.worktreePickerCursor = 0;
+    const output = strip(renderListView(state));
+    expect(output).toContain('switch worktree api-gateway');
+  });
+
+  it('marks current worktree', () => {
+    const state = createTestState();
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/home/user/project', branch: 'main' },
+      { path: '/home/user/project-fix', branch: 'fix-bug' },
+    ];
+    state.worktreePickerCursor = 0;
+    state.worktreePickerCurrentPath = '/home/user/project';
+    const output = strip(renderListView(state));
+    expect(output).toContain('(current)');
+  });
+
+  it('does not mark non-current worktree as current', () => {
+    const state = createTestState();
+    state.worktreePickerActive = true;
+    state.worktreePickerEntries = [
+      { path: '/home/user/project', branch: 'main' },
+      { path: '/home/user/project-fix', branch: 'fix-bug' },
+    ];
+    state.worktreePickerCursor = 0;
+    state.worktreePickerCurrentPath = '/home/user/project';
+    const output = strip(renderListView(state));
+    // Only one "(current)" tag
+    const matches = output.match(/\(current\)/g);
+    expect(matches).toHaveLength(1);
+  });
+
+  it('shows switching action in bottom panel', () => {
+    const state = createTestState();
+    const entry = state.flatList[state.cursor];
+    const sk = statusKey(entry.file, entry.service);
+    state.bottomLogLines.set(sk, { action: 'switching', service: entry.service, lines: ['switching to worktree "fix-bug"...'] });
+    state.showBottomLogs = true;
+    const output = strip(renderListView(state));
+    expect(output).toContain('switching');
+  });
+
+  it('shows switch_failed action in bottom panel', () => {
+    const state = createTestState();
+    const entry = state.flatList[state.cursor];
+    const sk = statusKey(entry.file, entry.service);
+    state.bottomLogLines.set(sk, { action: 'switch_failed', service: entry.service, lines: ['compose file not found'] });
+    state.showBottomLogs = true;
+    const output = strip(renderListView(state));
+    expect(output).toContain('SWITCH FAILED');
   });
 });

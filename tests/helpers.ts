@@ -63,6 +63,8 @@ export function createMockStatus(overrides: Partial<ContainerStatus> = {}): Cont
     startedAt: new Date(Date.now() - 1800000).toISOString(),
     id: 'abc123',
     ports: [{ published: 8080, target: 8080 }],
+    workingDir: null,
+    worktree: null,
     ...overrides,
   };
 }

@@ -48,6 +48,7 @@ recomposable
 - **Docker Compose Watch** — toggle `docker compose watch` per service, with live output in the log panel
 - **Dependency-aware rebuild** — rebuild a service then automatically restart all its transitive dependents in topological order
 - **Container exec** — run commands inside any container, inline in the bottom panel (`e`) or full-screen (`x`), with `cd` support and command history
+- **Worktree switching** — switch any service to run from a different git worktree (`t`), automatically rebuilds and starts in the target branch
 - **Vim keybindings** — navigate with `j`/`k`, `G`/`gg`, and more
 
 ## Full Log View
@@ -67,6 +68,12 @@ Press `w` to toggle `docker compose watch` for a service. A cyan `W` indicator a
 ## Dependency-Aware Rebuild
 
 Press `d` to rebuild the selected service and then automatically restart all services that depend on it (transitively), in the correct topological order. Progress is shown step-by-step in the log panel. If the service has no dependents, falls back to a regular rebuild.
+
+## Worktree Switching
+
+Press `t` on any service to switch it to a different git worktree. A picker shows all available worktrees — navigate with `j`/`k`, confirm with `Enter`. The service is automatically stopped, rebuilt, and started from the target worktree's compose file. A `WORKTREE` column appears when services run from multiple branches, with non-main branches highlighted in yellow.
+
+This is useful for end-to-end testing changes across branches without drowning in terminal tabs. Run your main stack on `main`, then switch individual services to feature branches to verify their behavior in the full environment. Particularly handy when letting Claude Code work in worktrees — switch the affected service, verify it end-to-end, and switch back, all from a single terminal.
 
 ## Adding Compose Files
 
@@ -136,6 +143,7 @@ recomposable -f docker-compose.yml -f docker-compose.prod.yml
 | `x` | Full-screen exec mode |
 | `n` | Toggle no-cache mode (rebuild with `--no-cache` + `--force-recreate`) |
 | `f` / `Enter` | Full-screen log view for selected service |
+| `t` | Switch service to a different git worktree |
 | `l` | Toggle inline log panel |
 | `/` | Search in inline log panel |
 | `G` | Jump to bottom |

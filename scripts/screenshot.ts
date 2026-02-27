@@ -6,7 +6,7 @@ import { clearScreen, renderListView, renderLogView, renderExecView } from '../s
 import type { Killable } from '../src/lib/types';
 
 // --- Mock terminal dimensions ---
-const COLS = 128;
+const COLS = 145;
 const ROWS = 48;
 process.stdout.columns = COLS;
 process.stdout.rows = ROWS;
@@ -73,24 +73,25 @@ state.groups = [
 state.flatList = buildFlatList(state.groups);
 
 // --- Mock statuses ---
-const mockStatuses: Record<string, { state: string; health: string; createdAt: string; startedAt: string; id: string; ports: Array<{ published: number; target: number }> } | null> = {
-  'infra/docker-compose.yml::postgres':  { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc1', ports: [{ published: 5432, target: 5432 }] },
-  'infra/docker-compose.yml::redis':     { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc2', ports: [{ published: 6379, target: 6379 }] },
-  'infra/docker-compose.yml::rabbitmq':  { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc3', ports: [{ published: 5672, target: 5672 }, { published: 15672, target: 15672 }] },
-  'infra/docker-compose.yml::minio':     { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc4', ports: [{ published: 9000, target: 9000 }] },
-  'infra/docker-compose.yml::qdrant':    { state: 'running', health: 'unhealthy', createdAt: days(14), startedAt: days(3), id: 'abc5', ports: [{ published: 6333, target: 6333 }] },
+type MockStatus = { state: string; health: string; createdAt: string; startedAt: string; id: string; ports: Array<{ published: number; target: number }>; workingDir: string | null; worktree: string | null };
+const mockStatuses: Record<string, MockStatus | null> = {
+  'infra/docker-compose.yml::postgres':  { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc1', ports: [{ published: 5432, target: 5432 }], workingDir: null, worktree: 'main' },
+  'infra/docker-compose.yml::redis':     { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc2', ports: [{ published: 6379, target: 6379 }], workingDir: null, worktree: 'main' },
+  'infra/docker-compose.yml::rabbitmq':  { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc3', ports: [{ published: 5672, target: 5672 }, { published: 15672, target: 15672 }], workingDir: null, worktree: 'main' },
+  'infra/docker-compose.yml::minio':     { state: 'running', health: 'healthy', createdAt: days(14), startedAt: days(3), id: 'abc4', ports: [{ published: 9000, target: 9000 }], workingDir: null, worktree: 'main' },
+  'infra/docker-compose.yml::qdrant':    { state: 'running', health: 'unhealthy', createdAt: days(14), startedAt: days(3), id: 'abc5', ports: [{ published: 6333, target: 6333 }], workingDir: null, worktree: 'main' },
 
-  'services/docker-compose.yml::api-gateway':          { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'svc1', ports: [{ published: 8080, target: 8080 }] },
-  'services/docker-compose.yml::auth-service':         { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'svc2', ports: [{ published: 5001, target: 5001 }] },
-  'services/docker-compose.yml::user-service':         { state: 'running', health: 'healthy', createdAt: hours(2), startedAt: hours(2), id: 'svc3', ports: [{ published: 5002, target: 5002 }] },
-  'services/docker-compose.yml::billing-service':      { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'svc4', ports: [{ published: 5003, target: 5003 }] },
+  'services/docker-compose.yml::api-gateway':          { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'svc1', ports: [{ published: 8080, target: 8080 }], workingDir: null, worktree: 'main' },
+  'services/docker-compose.yml::auth-service':         { state: 'running', health: 'healthy', createdAt: days(1), startedAt: minutes(12), id: 'svc2', ports: [{ published: 5001, target: 5001 }], workingDir: null, worktree: 'fix-oauth' },
+  'services/docker-compose.yml::user-service':         { state: 'running', health: 'healthy', createdAt: hours(2), startedAt: hours(2), id: 'svc3', ports: [{ published: 5002, target: 5002 }], workingDir: null, worktree: 'main' },
+  'services/docker-compose.yml::billing-service':      { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'svc4', ports: [{ published: 5003, target: 5003 }], workingDir: null, worktree: 'main' },
   'services/docker-compose.yml::notification-service': null,
-  'services/docker-compose.yml::search-service':       { state: 'running', health: 'healthy', createdAt: days(2), startedAt: days(1), id: 'svc6', ports: [{ published: 5005, target: 5005 }] },
-  'services/docker-compose.yml::analytics-service':    { state: 'running', health: 'healthy', createdAt: days(1), startedAt: minutes(45), id: 'svc7', ports: [{ published: 5006, target: 5006 }] },
+  'services/docker-compose.yml::search-service':       { state: 'running', health: 'healthy', createdAt: days(2), startedAt: days(1), id: 'svc6', ports: [{ published: 5005, target: 5005 }], workingDir: null, worktree: 'main' },
+  'services/docker-compose.yml::analytics-service':    { state: 'running', health: 'healthy', createdAt: days(1), startedAt: minutes(45), id: 'svc7', ports: [{ published: 5006, target: 5006 }], workingDir: null, worktree: 'main' },
 
-  'apps/docker-compose.yml::web-app':          { state: 'running', health: 'healthy', createdAt: hours(2), startedAt: hours(2), id: 'app1', ports: [{ published: 3000, target: 3000 }] },
-  'apps/docker-compose.yml::admin-dashboard':  { state: 'running', health: 'healthy', createdAt: days(3), startedAt: days(1), id: 'app2', ports: [{ published: 3001, target: 3001 }] },
-  'apps/docker-compose.yml::worker':           { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'app3', ports: [] },
+  'apps/docker-compose.yml::web-app':          { state: 'running', health: 'healthy', createdAt: hours(2), startedAt: minutes(8), id: 'app1', ports: [{ published: 3000, target: 3000 }], workingDir: null, worktree: 'feat-dashboard' },
+  'apps/docker-compose.yml::admin-dashboard':  { state: 'running', health: 'healthy', createdAt: days(3), startedAt: days(1), id: 'app2', ports: [{ published: 3001, target: 3001 }], workingDir: null, worktree: 'main' },
+  'apps/docker-compose.yml::worker':           { state: 'running', health: 'healthy', createdAt: days(1), startedAt: days(1), id: 'app3', ports: [], workingDir: null, worktree: 'main' },
 };
 
 for (const [key, val] of Object.entries(mockStatuses)) {
@@ -160,6 +161,7 @@ state.watching.set('services/docker-compose.yml::api-gateway', mockKillable);
 state.cursor = 7;
 state.scrollOffset = 0;
 state.showBottomLogs = true;
+state.showWorktreeColumn = true;
 
 // --- Mock bottom log panel showing logs for the selected service ---
 const selectedKey = statusKey('services/docker-compose.yml', 'user-service');

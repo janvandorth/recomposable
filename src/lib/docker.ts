@@ -13,12 +13,13 @@ import type {
   RebuildEmitter,
   RebuildOptions,
   DependencyGraph,
+  GitWorktree,
 } from './types';
 
 export function listServices(file: string): string[] {
   const cwd = path.dirname(path.resolve(file));
   const args = ['compose', '-f', path.resolve(file), 'config', '--services'];
-  const out = execFileSync('docker', args, { cwd, encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' });
+  const out = execFileSync('docker', args, { cwd, encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL', stdio: ['pipe', 'pipe', 'pipe'] });
   return out.trim().split('\n').filter(Boolean);
 }
 
@@ -77,7 +78,7 @@ export function getStatuses(file: string): Map<string, ContainerStatus> {
       return true;
     });
 
-    statuses.set(name, { state, health, createdAt, startedAt: null, id: id || null, ports });
+    statuses.set(name, { state, health, createdAt, startedAt: null, id: id || null, ports, workingDir: null, worktree: null });
     if (id) idToService.set(id, name);
   }
 
@@ -92,8 +93,11 @@ export function getStatuses(file: string): Map<string, ContainerStatus> {
         for (const [id, svc] of idToService) {
           if (info.Id && info.Id.startsWith(id)) {
             const status = statuses.get(svc);
-            if (status && info.State) {
-              status.startedAt = info.State.StartedAt || null;
+            if (status) {
+              if (info.State) {
+                status.startedAt = info.State.StartedAt || null;
+              }
+              status.workingDir = info.Config?.Labels?.['com.docker.compose.project.working_dir'] || null;
             }
             break;
           }
@@ -104,7 +108,30 @@ export function getStatuses(file: string): Map<string, ContainerStatus> {
     }
   }
 
+  for (const status of statuses.values()) {
+    if (status.workingDir) {
+      status.worktree = resolveGitWorktree(status.workingDir);
+    }
+  }
+
   return statuses;
+}
+
+const worktreeCache = new Map<string, string | null>();
+
+export function resolveGitWorktree(workingDir: string): string | null {
+  if (worktreeCache.has(workingDir)) return worktreeCache.get(workingDir)!;
+  try {
+    const branch = execFileSync('git', ['-C', workingDir, 'rev-parse', '--abbrev-ref', 'HEAD'], {
+      encoding: 'utf8', timeout: 3000, killSignal: 'SIGKILL' as NodeJS.Signals, stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    const result = branch || null;
+    worktreeCache.set(workingDir, result);
+    return result;
+  } catch {
+    worktreeCache.set(workingDir, null);
+    return null;
+  }
 }
 
 export function rebuildService(file: string, service: string, opts: RebuildOptions = {}): RebuildChild {
@@ -358,5 +385,58 @@ export function execInContainer(containerId: string, command: string, cwd?: stri
   args.push(containerId, 'sh', '-c', command);
   const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
   return child;
+}
+
+// --- Git Worktree ---
+
+export function getGitRoot(dir: string): string | null {
+  try {
+    return execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8', timeout: 3000, killSignal: 'SIGKILL' as NodeJS.Signals, stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export function listGitWorktrees(dir: string): GitWorktree[] {
+  try {
+    const out = execFileSync('git', ['-C', dir, 'worktree', 'list', '--porcelain'], {
+      encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL' as NodeJS.Signals, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const result: GitWorktree[] = [];
+    const blocks = out.split('\n\n');
+    for (const block of blocks) {
+      const lines = block.trim().split('\n');
+      if (lines.length === 0) continue;
+      let wtPath = '';
+      let branch = '';
+      let isBare = false;
+      for (const line of lines) {
+        if (line.startsWith('worktree ')) {
+          wtPath = line.substring('worktree '.length);
+        } else if (line.startsWith('branch refs/heads/')) {
+          branch = line.substring('branch refs/heads/'.length);
+        } else if (line === 'bare') {
+          isBare = true;
+        }
+      }
+      if (wtPath && branch && !isBare) {
+        result.push({ path: wtPath, branch });
+      }
+    }
+    return result;
+  } catch {
+    return [];
+  }
+}
+
+export function validateServiceInComposeFile(file: string, service: string): boolean {
+  try {
+    const services = listServices(file);
+    return services.includes(service);
+  } catch {
+    return false;
+  }
 }
 

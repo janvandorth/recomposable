@@ -3,5 +3,6 @@
     "docker-compose.yml"
   ],
   "pollInterval": 3000,
-  "logTailLines": 100
+  "logTailLines": 100,
+  "logScanPatterns": [["WRN]", "WARNING"], ["ERR]", "ERROR"]]
 }
