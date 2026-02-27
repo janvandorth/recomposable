@@ -18,7 +18,7 @@ import type {
 export function listServices(file: string): string[] {
   const cwd = path.dirname(path.resolve(file));
   const args = ['compose', '-f', path.resolve(file), 'config', '--services'];
-  const out = execFileSync('docker', args, { cwd, encoding: 'utf8', timeout: 10000 });
+  const out = execFileSync('docker', args, { cwd, encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' });
   return out.trim().split('\n').filter(Boolean);
 }
 
@@ -27,7 +27,7 @@ export function getStatuses(file: string): Map<string, ContainerStatus> {
   const args = ['compose', '-f', path.resolve(file), 'ps', '--format', 'json'];
   let out: string;
   try {
-    out = execFileSync('docker', args, { cwd, encoding: 'utf8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'] });
+    out = execFileSync('docker', args, { cwd, encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL', stdio: ['pipe', 'pipe', 'pipe'] });
   } catch {
     return new Map();
   }
@@ -85,7 +85,7 @@ export function getStatuses(file: string): Map<string, ContainerStatus> {
   if (ids.length > 0) {
     try {
       const inspectOut = execFileSync('docker', ['inspect', ...ids], {
-        encoding: 'utf8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe']
+        encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL', stdio: ['pipe', 'pipe', 'pipe']
       });
       const inspected = JSON.parse(inspectOut) as DockerInspectEntry[];
       for (const info of inspected) {
@@ -112,7 +112,20 @@ export function rebuildService(file: string, service: string, opts: RebuildOptio
   const resolvedFile = path.resolve(file);
   const spawnOpts = {
     cwd, stdio: ['ignore', 'pipe', 'pipe'] as ['ignore', 'pipe', 'pipe'], detached: false,
-    env: { ...process.env, BUILDKIT_PROGRESS: 'plain' },
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      USER: process.env.USER,
+      LANG: process.env.LANG,
+      DOCKER_HOST: process.env.DOCKER_HOST,
+      DOCKER_CONTEXT: process.env.DOCKER_CONTEXT,
+      DOCKER_CONFIG: process.env.DOCKER_CONFIG,
+      DOCKER_TLS_VERIFY: process.env.DOCKER_TLS_VERIFY,
+      DOCKER_CERT_PATH: process.env.DOCKER_CERT_PATH,
+      COMPOSE_FILE: process.env.COMPOSE_FILE,
+      COMPOSE_PROJECT_NAME: process.env.COMPOSE_PROJECT_NAME,
+      BUILDKIT_PROGRESS: 'plain',
+    },
   };
 
   if (opts.noCache) {
@@ -133,7 +146,10 @@ export function rebuildService(file: string, service: string, opts: RebuildOptio
         emitter.emit('close', code);
         return;
       }
-      const upChild = spawn('docker', ['compose', '-f', resolvedFile, 'up', '-d', '--force-recreate', service], spawnOpts);
+      const upArgs = ['compose', '-f', resolvedFile, 'up', '-d', '--force-recreate'];
+      if (opts.noDeps) upArgs.push('--no-deps');
+      upArgs.push(service);
+      const upChild = spawn('docker', upArgs, spawnOpts);
       upChild.stdout.pipe(stdout);
       upChild.stderr.pipe(stderr);
       upChild.on('close', (upCode: number | null) => emitter.emit('close', upCode));
@@ -144,14 +160,23 @@ export function rebuildService(file: string, service: string, opts: RebuildOptio
     return emitter;
   }
 
-  const args = ['compose', '-f', resolvedFile, 'up', '-d', '--build', service];
+  const args = ['compose', '-f', resolvedFile, 'up', '-d', '--build'];
+  if (opts.noDeps) args.push('--no-deps');
+  args.push(service);
   const child = spawn('docker', args, spawnOpts);
   return child;
 }
 
-export function tailLogs(file: string, service: string, tailLines: number): ChildProcess {
+export function tailLogs(file: string, service: string, tailLines: number | 'all'): ChildProcess {
   const cwd = path.dirname(path.resolve(file));
   const args = ['compose', '-f', path.resolve(file), 'logs', '-f', '--tail', String(tailLines), service];
+  const child = spawn('docker', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+  return child;
+}
+
+export function fetchServiceLogs(file: string, service: string, tailLines: number | 'all'): ChildProcess {
+  const cwd = path.dirname(path.resolve(file));
+  const args = ['compose', '-f', path.resolve(file), 'logs', '--tail', String(tailLines), service];
   const child = spawn('docker', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
   return child;
 }
@@ -160,7 +185,7 @@ export function getContainerId(file: string, service: string): string | null {
   const cwd = path.dirname(path.resolve(file));
   const args = ['compose', '-f', path.resolve(file), 'ps', '-q', service];
   try {
-    const out = execFileSync('docker', args, { cwd, encoding: 'utf8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] });
+    const out = execFileSync('docker', args, { cwd, encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL' as NodeJS.Signals, stdio: ['pipe', 'pipe', 'pipe'] });
     return out.trim() || null;
   } catch {
     return null;
@@ -239,7 +264,7 @@ export function isWatchAvailable(): boolean {
   if (watchAvailableCache !== null) return watchAvailableCache;
   try {
     execFileSync('docker', ['compose', 'watch', '--help'], {
-      encoding: 'utf8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL' as NodeJS.Signals, stdio: ['pipe', 'pipe', 'pipe'],
     });
     watchAvailableCache = true;
   } catch {
@@ -265,7 +290,7 @@ export function parseDependencyGraph(file: string): DependencyGraph {
 
   try {
     const out = execFileSync('docker', ['compose', '-f', resolvedFile, 'config', '--format', 'json'], {
-      cwd, encoding: 'utf8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+      cwd, encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL', stdio: ['pipe', 'pipe', 'pipe'],
     });
     const config = JSON.parse(out);
     const services = config.services || {};
@@ -289,7 +314,7 @@ export function parseDependencyGraph(file: string): DependencyGraph {
     // Fallback: try plain docker compose config and regex-parse YAML
     try {
       const out = execFileSync('docker', ['compose', '-f', resolvedFile, 'config'], {
-        cwd, encoding: 'utf8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+        cwd, encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL', stdio: ['pipe', 'pipe', 'pipe'],
       });
       let currentService: string | null = null;
       let inDependsOn = false;

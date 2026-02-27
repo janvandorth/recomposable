@@ -22,6 +22,7 @@ vi.mock('../src/lib/docker', () => ({
   stopService: vi.fn(() => mockChildProcess()),
   startService: vi.fn(() => mockChildProcess()),
   tailLogs: vi.fn(() => mockChildProcess()),
+  fetchServiceLogs: vi.fn(() => mockChildProcess()),
   getContainerId: vi.fn(() => null),
   tailContainerLogs: vi.fn(() => mockChildProcess()),
   fetchContainerLogs: vi.fn(() => mockChildProcess()),
@@ -67,6 +68,188 @@ describe('stripAnsi', () => {
 
   it('strips OSC sequences', () => {
     expect(stripAnsi('\x1b]0;title\x07text')).toBe('text');
+  });
+
+  it('strips OSC sequences terminated with ST', () => {
+    expect(stripAnsi('\x1b]0;title\x1b\\text')).toBe('text');
+  });
+
+  it('strips DCS sequences', () => {
+    expect(stripAnsi('\x1bPsome device control\x1b\\visible')).toBe('visible');
+  });
+
+  it('strips APC sequences', () => {
+    expect(stripAnsi('\x1b_application command\x1b\\visible')).toBe('visible');
+  });
+
+  it('strips PM sequences', () => {
+    expect(stripAnsi('\x1b^privacy message\x1b\\visible')).toBe('visible');
+  });
+
+  it('strips SOS sequences', () => {
+    expect(stripAnsi('\x1bXstart of string\x1b\\visible')).toBe('visible');
+  });
+
+  it('strips mixed DCS/CSI/OSC sequences', () => {
+    expect(stripAnsi('\x1bPdcs\x1b\\\x1b[31mred\x1b[0m\x1b]0;title\x07end')).toBe('redend');
+  });
+});
+
+describe('shellEscape', () => {
+  let shellEscape: (str: string) => string;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    shellEscape = mod.shellEscape;
+  });
+
+  it('wraps simple string in single quotes', () => {
+    expect(shellEscape('foo')).toBe("'foo'");
+  });
+
+  it('escapes single quotes within the string', () => {
+    expect(shellEscape("it's")).toBe("'it'\\''s'");
+  });
+
+  it('neutralises shell metacharacters', () => {
+    expect(shellEscape('$(whoami)')).toBe("'$(whoami)'");
+    expect(shellEscape('; rm -rf /')).toBe("'; rm -rf /'");
+    expect(shellEscape('`id`')).toBe("'`id`'");
+  });
+
+  it('handles empty string', () => {
+    expect(shellEscape('')).toBe("''");
+  });
+});
+
+describe('loadConfig validation', () => {
+  let loadConfig: () => import('../src/lib/types').Config;
+  const origCwd = process.cwd;
+  const origArgv = process.argv;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    loadConfig = mod.loadConfig;
+  });
+
+  afterEach(() => {
+    process.cwd = origCwd;
+    process.argv = origArgv;
+  });
+
+  it('ignores non-numeric values for numeric fields', async () => {
+    const fs = await import('fs');
+    const existsSyncSpy = vi.spyOn(fs.default, 'existsSync').mockReturnValue(true);
+    const readFileSyncSpy = vi.spyOn(fs.default, 'readFileSync').mockReturnValue(JSON.stringify({
+      composeFiles: ['test.yml'],
+      pollInterval: 'not-a-number',
+      logTailLines: null,
+      statsInterval: { nested: true },
+    }));
+
+    const config = loadConfig();
+    expect(config.pollInterval).toBe(3000); // default preserved
+    expect(config.logTailLines).toBe(100);  // default preserved
+    expect(config.statsInterval).toBe(5000); // default preserved
+
+    existsSyncSpy.mockRestore();
+    readFileSyncSpy.mockRestore();
+  });
+
+  it('rejects out-of-range numeric values', async () => {
+    const fs = await import('fs');
+    const existsSyncSpy = vi.spyOn(fs.default, 'existsSync').mockReturnValue(true);
+    const readFileSyncSpy = vi.spyOn(fs.default, 'readFileSync').mockReturnValue(JSON.stringify({
+      composeFiles: ['test.yml'],
+      pollInterval: 0,
+      statsBufferSize: -5,
+      bottomLogCount: 999999,
+    }));
+
+    const config = loadConfig();
+    expect(config.pollInterval).toBe(3000);
+    expect(config.statsBufferSize).toBe(6);
+    expect(config.bottomLogCount).toBe(10);
+
+    existsSyncSpy.mockRestore();
+    readFileSyncSpy.mockRestore();
+  });
+
+  it('rejects __proto__ and non-object config', async () => {
+    const fs = await import('fs');
+    const existsSyncSpy = vi.spyOn(fs.default, 'existsSync').mockReturnValue(true);
+    const readFileSyncSpy = vi.spyOn(fs.default, 'readFileSync').mockReturnValue(JSON.stringify({
+      composeFiles: ['test.yml'],
+      __proto__: { polluted: true },
+    }));
+
+    const config = loadConfig();
+    expect((config as unknown as Record<string, unknown>).polluted).toBeUndefined();
+
+    existsSyncSpy.mockRestore();
+    readFileSyncSpy.mockRestore();
+  });
+
+  it('rejects non-string-array composeFiles', async () => {
+    const fs = await import('fs');
+    const existsSyncSpy = vi.spyOn(fs.default, 'existsSync').mockReturnValue(true);
+    const readFileSyncSpy = vi.spyOn(fs.default, 'readFileSync').mockReturnValue(JSON.stringify({
+      composeFiles: [123, null],
+    }));
+
+    // should keep default empty array and exit
+    expect(() => loadConfig()).not.toThrow();
+
+    existsSyncSpy.mockRestore();
+    readFileSyncSpy.mockRestore();
+  });
+
+  it('accepts valid numeric values', async () => {
+    const fs = await import('fs');
+    const existsSyncSpy = vi.spyOn(fs.default, 'existsSync').mockReturnValue(true);
+    const readFileSyncSpy = vi.spyOn(fs.default, 'readFileSync').mockReturnValue(JSON.stringify({
+      composeFiles: ['test.yml'],
+      pollInterval: 5000,
+      logTailLines: 200,
+      bottomLogCount: 20,
+    }));
+
+    const config = loadConfig();
+    expect(config.pollInterval).toBe(5000);
+    expect(config.logTailLines).toBe(200);
+    expect(config.bottomLogCount).toBe(20);
+
+    existsSyncSpy.mockRestore();
+    readFileSyncSpy.mockRestore();
+  });
+});
+
+describe('exec history cap', () => {
+  let runExecCommand: (state: AppState) => void;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    runExecCommand = mod.runExecCommand;
+  });
+
+  it('caps exec history at 1000 entries', () => {
+    const state = createTestState();
+    state.execContainerId = 'abc123';
+    state.execService = 'web';
+    state.execActive = true;
+    state.mode = MODE.LIST;
+    // Pre-fill with 1000 unique entries
+    for (let i = 0; i < 1000; i++) {
+      state.execHistory.push(`cmd-${i}`);
+    }
+    expect(state.execHistory.length).toBe(1000);
+
+    state.execInput = 'new-command';
+    runExecCommand(state);
+
+    expect(state.execHistory.length).toBe(1000);
+    expect(state.execHistory[0]).toBe('cmd-1'); // first was shifted off
+    expect(state.execHistory[999]).toBe('new-command');
   });
 });
 
@@ -204,6 +387,179 @@ describe('handleKeypress - LIST bottom search', () => {
     expect(state.bottomSearchActive).toBe(false);
     expect(state.bottomSearchQuery).toBe('test');
   });
+
+  it('Enter with query triggers full log fetch', () => {
+    const state = createTestState();
+    state.bottomSearchActive = true;
+    state.bottomSearchQuery = 'error';
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.selectedLogKey = sk;
+    state.bottomLogLines.set(sk, { action: 'logs', service: 'postgres', lines: ['original line'] });
+    handleKeypress(state, '\r');
+    expect(state.bottomSearchActive).toBe(false);
+    expect(state.bottomSearchLoading).toBe(true);
+    expect(state.bottomSearchSavedLines.has(sk)).toBe(true);
+    expect(state.bottomSearchSavedLines.get(sk)).toEqual(['original line']);
+  });
+
+  it('Esc clears search and restores saved lines', () => {
+    const state = createTestState();
+    state.bottomSearchActive = true;
+    state.bottomSearchQuery = 'error';
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.selectedLogKey = sk;
+    state.bottomLogLines.set(sk, { action: 'logs', service: 'postgres', lines: ['filtered line'] });
+    state.bottomSearchSavedLines.set(sk, ['original line 1', 'original line 2']);
+    handleKeypress(state, '\x1b');
+    expect(state.bottomSearchQuery).toBe('');
+    const info = state.bottomLogLines.get(sk)!;
+    expect(info.lines).toEqual(['original line 1', 'original line 2']);
+    expect(state.bottomSearchSavedLines.has(sk)).toBe(false);
+  });
+});
+
+describe('clearBottomSearch', () => {
+  let clearBottomSearch: (state: AppState) => void;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    clearBottomSearch = mod.clearBottomSearch;
+  });
+
+  it('restores saved lines and resets state', () => {
+    const state = createTestState();
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.selectedLogKey = sk;
+    state.bottomLogLines.set(sk, { action: 'logs', service: 'postgres', lines: ['matched'] });
+    state.bottomSearchSavedLines.set(sk, ['original 1', 'original 2']);
+    state.bottomSearchLoading = true;
+    state.bottomSearchTotalMatches = 5;
+    clearBottomSearch(state);
+    expect(state.bottomSearchLoading).toBe(false);
+    expect(state.bottomSearchTotalMatches).toBe(0);
+    expect(state.bottomLogLines.get(sk)!.lines).toEqual(['original 1', 'original 2']);
+    expect(state.bottomSearchSavedLines.has(sk)).toBe(false);
+  });
+
+  it('kills pending search child', () => {
+    const state = createTestState();
+    const mockChild = { kill: vi.fn() } as any;
+    state.bottomSearchChild = mockChild;
+    clearBottomSearch(state);
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(state.bottomSearchChild).toBeNull();
+  });
+});
+
+describe('enterLogs carries bottom search query', () => {
+  let enterLogs: (state: AppState) => void;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    enterLogs = mod.enterLogs;
+  });
+
+  it('carries bottom search query to full log search', () => {
+    const state = createTestState();
+    state.bottomSearchQuery = 'myerror';
+    state.bottomSearchTotalMatches = 5;
+    enterLogs(state);
+    expect(state.mode).toBe(MODE.LOGS);
+    expect(state.logSearchQuery).toBe('myerror');
+    expect(state.logSearchPending).toBe(true);
+    expect(state.bottomSearchQuery).toBe('myerror');
+  });
+
+  it('enters logs without search when no bottom query', () => {
+    const state = createTestState();
+    state.bottomSearchQuery = '';
+    enterLogs(state);
+    expect(state.mode).toBe(MODE.LOGS);
+    expect(state.logSearchQuery).toBe('');
+    expect(state.logSearchPending).toBe(false);
+  });
+});
+
+describe('enterLogs - build log detection', () => {
+  let enterLogs: (state: AppState) => void;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    enterLogs = mod.enterLogs;
+  });
+
+  it('populates logLines from build output when service is rebuilding', () => {
+    const state = createTestState();
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.rebuilding.set(sk, createMockKillable());
+    state.bottomLogLines.set(sk, {
+      action: 'rebuilding',
+      service: 'postgres',
+      lines: ['Step 1/5 FROM node:18', 'Step 2/5 COPY . .', 'Step 3/5 RUN npm install'],
+    });
+    enterLogs(state);
+    expect(state.mode).toBe(MODE.LOGS);
+    expect(state.logBuildKey).toBe(sk);
+    expect(state.logLines).toEqual(['Step 1/5 FROM node:18', 'Step 2/5 COPY . .', 'Step 3/5 RUN npm install']);
+    expect(state.logChild).toBeNull();
+    expect(state.logHistoryLoaded).toBe(true);
+  });
+
+  it('populates logLines from build output when service has build_failed', () => {
+    const state = createTestState();
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.bottomLogLines.set(sk, {
+      action: 'build_failed',
+      service: 'postgres',
+      lines: ['Step 1/3 FROM node:18', 'Step 2/3 RUN make', 'ERROR: build failed'],
+    });
+    enterLogs(state);
+    expect(state.mode).toBe(MODE.LOGS);
+    expect(state.logBuildKey).toBe(sk);
+    expect(state.logLines).toEqual(['Step 1/3 FROM node:18', 'Step 2/3 RUN make', 'ERROR: build failed']);
+    expect(state.logChild).toBeNull();
+  });
+
+  it('populates logLines from build output when service is cascading', () => {
+    const state = createTestState();
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.cascading.set(sk, { steps: [], currentStepIdx: 0, child: null });
+    state.bottomLogLines.set(sk, {
+      action: 'cascading',
+      service: 'postgres',
+      lines: ['cascade build line 1'],
+    });
+    enterLogs(state);
+    expect(state.mode).toBe(MODE.LOGS);
+    expect(state.logBuildKey).toBe(sk);
+    expect(state.logLines).toEqual(['cascade build line 1']);
+  });
+
+  it('spawns tailLogs when service is not building', () => {
+    const state = createTestState();
+    enterLogs(state);
+    expect(state.mode).toBe(MODE.LOGS);
+    expect(state.logBuildKey).toBeNull();
+    expect(state.logChild).not.toBeNull();
+  });
+});
+
+describe('exitLogs clears logBuildKey', () => {
+  let exitLogs: (state: AppState) => void;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    exitLogs = mod.exitLogs;
+  });
+
+  it('clears logBuildKey on exit', () => {
+    const state = createTestState();
+    state.mode = MODE.LOGS;
+    state.logBuildKey = 'some-key';
+    exitLogs(state);
+    expect(state.logBuildKey).toBeNull();
+    expect(state.mode).toBe(MODE.LIST);
+  });
 });
 
 describe('handleKeypress - LOGS mode', () => {
@@ -226,11 +582,11 @@ describe('handleKeypress - LOGS mode', () => {
   it('k scrolls up (increases offset)', () => {
     const state = createTestState();
     state.mode = MODE.LOGS;
-    state.logScrollOffset = 5;
+    state.logScrollOffset = 3;
     state.logLines = Array(20).fill('line');
     handleKeypress(state, 'k');
     expect(state.logAutoScroll).toBe(false);
-    expect(state.logScrollOffset).toBe(6);
+    expect(state.logScrollOffset).toBe(4);
   });
 
   it('G goes to bottom (live mode)', () => {
@@ -279,10 +635,36 @@ describe('handleKeypress - LOGS mode', () => {
     expect(state.mode).toBe(MODE.LIST);
   });
 
-  it('Esc exits logs mode', () => {
+  it('Esc exits logs mode when no search active', () => {
     const state = createTestState();
     state.mode = MODE.LOGS;
     handleKeypress(state, '\x1b');
+    expect(state.mode).toBe(MODE.LIST);
+  });
+
+  it('Esc clears search first, then exits on second press', () => {
+    const state = createTestState();
+    state.mode = MODE.LOGS;
+    state.logSearchQuery = 'error';
+    state.logSearchMatches = [0, 2];
+    state.logSearchMatchIdx = 1;
+    handleKeypress(state, '\x1b');
+    // First Esc clears search but stays in LOGS
+    expect(state.mode).toBe(MODE.LOGS);
+    expect(state.logSearchQuery).toBe('');
+    expect(state.logSearchMatches).toEqual([]);
+    expect(state.logSearchMatchIdx).toBe(-1);
+    // Second Esc exits logs
+    handleKeypress(state, '\x1b');
+    expect(state.mode).toBe(MODE.LIST);
+  });
+
+  it('f always exits logs even with active search', () => {
+    const state = createTestState();
+    state.mode = MODE.LOGS;
+    state.logSearchQuery = 'error';
+    state.logSearchMatches = [0, 2];
+    handleKeypress(state, 'f');
     expect(state.mode).toBe(MODE.LIST);
   });
 });
@@ -324,14 +706,28 @@ describe('handleKeypress - LOGS search input', () => {
     expect(state.logSearchQuery).toBe('');
   });
 
-  it('Enter executes search', () => {
+  it('Enter executes search immediately when history loaded', () => {
     const state = createTestState();
     state.mode = MODE.LOGS;
     state.logSearchActive = true;
     state.logSearchQuery = 'error';
     state.logLines = ['no match', 'an error occurred', 'another error'];
+    state.logHistoryLoaded = true;
     handleKeypress(state, '\r');
     expect(state.logSearchActive).toBe(false);
+    expect(state.logSearchMatches).toEqual([1, 2]);
+  });
+
+  it('Enter triggers history load when not fully loaded', () => {
+    const state = createTestState();
+    state.mode = MODE.LOGS;
+    state.logSearchActive = true;
+    state.logSearchQuery = 'error';
+    state.logLines = ['no match', 'an error occurred'];
+    handleKeypress(state, '\r');
+    expect(state.logSearchActive).toBe(false);
+    expect(state.logSearchPending).toBe(true);
+    expect(state.logHistoryLoading).toBe(true);
   });
 });
 

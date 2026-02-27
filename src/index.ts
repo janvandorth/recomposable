@@ -4,9 +4,9 @@
 import fs from 'fs';
 import path from 'path';
 import type { ChildProcess } from 'child_process';
-import { listServices, getStatuses, rebuildService, restartService, stopService, startService, tailLogs, getContainerId, tailContainerLogs, fetchContainerLogs, fetchContainerStats, parseStatsLine, isWatchAvailable, watchService, parseDependencyGraph, execInContainer } from './lib/docker';
+import { listServices, getStatuses, rebuildService, restartService, stopService, startService, tailLogs, fetchServiceLogs, getContainerId, tailContainerLogs, fetchContainerLogs, fetchContainerStats, parseStatsLine, isWatchAvailable, watchService, parseDependencyGraph, execInContainer } from './lib/docker';
 import { MODE, createState, statusKey, buildFlatList, moveCursor, selectedEntry } from './lib/state';
-import { clearScreen, showCursor, renderListView, renderLogView, renderExecView } from './lib/renderer';
+import { clearScreen, showCursor, renderListView, renderLogView, renderExecView, CLEAR_EOL, CLEAR_EOS } from './lib/renderer';
 import type { Config, AppState, ServiceGroup, Killable, StatsHistory, CascadeStep, CascadeOperation } from './lib/types';
 
 // --- Module-level mutable state ---
@@ -52,7 +52,33 @@ export function loadConfig(): Config {
 
   const configPath = path.join(process.cwd(), 'recomposable.json');
   if (fs.existsSync(configPath)) {
-    Object.assign(defaults, JSON.parse(fs.readFileSync(configPath, 'utf8')));
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      if (Array.isArray(raw.composeFiles) && raw.composeFiles.every((f: unknown) => typeof f === 'string')) {
+        defaults.composeFiles = raw.composeFiles;
+      }
+      if (Array.isArray(raw.logScanPatterns) && raw.logScanPatterns.every((p: unknown) => typeof p === 'string')) {
+        defaults.logScanPatterns = raw.logScanPatterns;
+      }
+      const numericFields: Array<{ key: keyof Config; min: number; max: number }> = [
+        { key: 'pollInterval', min: 500, max: 300000 },
+        { key: 'logTailLines', min: 1, max: 50000 },
+        { key: 'logScanLines', min: 1, max: 50000 },
+        { key: 'logScanInterval', min: 1000, max: 600000 },
+        { key: 'statsInterval', min: 1000, max: 600000 },
+        { key: 'statsBufferSize', min: 1, max: 100 },
+        { key: 'bottomLogCount', min: 1, max: 200 },
+        { key: 'cpuWarnThreshold', min: 0, max: 10000 },
+        { key: 'cpuDangerThreshold', min: 0, max: 10000 },
+        { key: 'memWarnThreshold', min: 0, max: 1048576 },
+        { key: 'memDangerThreshold', min: 0, max: 1048576 },
+      ];
+      for (const { key, min, max } of numericFields) {
+        if (typeof raw[key] === 'number' && isFinite(raw[key]) && raw[key] >= min && raw[key] <= max) {
+          (defaults as unknown as Record<string, unknown>)[key] = raw[key];
+        }
+      }
+    }
   }
 
   const args = process.argv.slice(2);
@@ -234,19 +260,27 @@ export function pollContainerStats(state: AppState): void {
 // --- Rendering ---
 
 export function render(state: AppState): void {
-  let output = clearScreen();
+  let view = '';
   if (state.mode === MODE.LIST) {
-    output += renderListView(state);
+    view = renderListView(state);
   } else if (state.mode === MODE.LOGS) {
-    output += renderLogView(state);
+    view = renderLogView(state);
   } else if (state.mode === MODE.EXEC) {
-    output += renderExecView(state);
+    view = renderExecView(state);
   }
-  process.stdout.write(output);
+  // View functions already embed CLEAR_EOL per line; just clear below last line
+  process.stdout.write(clearScreen() + view + CLEAR_EOL + CLEAR_EOS);
 }
 
 export function stripAnsi(str: string): string {
-  return str.replace(/\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[^[\]]/g, '');
+  return str.replace(
+    // CSI sequences: \x1b[ ... letter
+    // OSC sequences: \x1b] ... BEL  or  \x1b] ... ST
+    // DCS/APC/PM/SOS sequences: \x1bP/\x1b_/\x1b^/\x1bX ... ST (where ST = \x1b\\)
+    // Two-byte escape sequences: \x1b + any char
+    /\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[P_^X][^\x1b]*(?:\x1b\\|\x07)|\x1b[^[\]P_^X]/g,
+    ''
+  );
 }
 
 export function throttledRender(state: AppState): void {
@@ -276,6 +310,7 @@ export function updateSelectedLogs(state: AppState): void {
 
   state.bottomSearchQuery = '';
   state.bottomSearchActive = false;
+  clearBottomSearch(state);
 
   if (moduleState.logFetchTimer) {
     clearTimeout(moduleState.logFetchTimer);
@@ -350,7 +385,7 @@ export function doRebuild(state: AppState): void {
     state.bottomLogTails.delete(sk);
   }
 
-  const child = rebuildService(entry.file, entry.service, { noCache: state.noCache });
+  const child = rebuildService(entry.file, entry.service, { noCache: state.noCache, noDeps: state.noDeps });
   state.rebuilding.set(sk, child as Killable);
 
   state.bottomLogLines.set(sk, { action: 'rebuilding', service: entry.service, lines: [] });
@@ -365,8 +400,10 @@ export function doRebuild(state: AppState): void {
     const newLines = parts.filter(l => l.trim().length > 0).map(stripAnsi).filter(Boolean);
     if (newLines.length === 0) return;
     info.lines.push(...newLines);
-    const maxLines = state.config.bottomLogCount || 10;
-    if (info.lines.length > maxLines) info.lines = info.lines.slice(-maxLines);
+    if (state.mode === MODE.LOGS && state.logBuildKey === sk) {
+      state.logLines.push(...newLines);
+      if (state.logAutoScroll) throttledRender(state);
+    }
     if (state.mode === MODE.LIST) throttledRender(state);
   };
 
@@ -374,16 +411,22 @@ export function doRebuild(state: AppState): void {
   child.stderr!.on('data', onData);
   render(state);
 
-  child.on('close', () => {
+  child.on('close', (code: number | null) => {
     state.rebuilding.delete(sk);
     state.containerStatsHistory.delete(sk);
     state.containerStats.delete(sk);
     pollStatuses(state);
 
     const info = state.bottomLogLines.get(sk);
+    if (code !== 0 && code !== null) {
+      if (info) info.action = 'build_failed';
+      if (state.mode === MODE.LIST) render(state);
+      return;
+    }
+
     if (info) {
       info.action = 'started';
-      info.lines = [];
+      if (state.logBuildKey !== sk) info.lines = [];
     }
 
     startBottomLogTail(state, sk, entry.file, entry.service);
@@ -409,13 +452,19 @@ export function doRestart(state: AppState): void {
   state.bottomLogLines.set(sk, { action: 'restarting', service: entry.service, lines: [] });
   render(state);
 
-  child.on('close', () => {
+  child.on('close', (code: number | null) => {
     state.restarting.delete(sk);
     state.containerStatsHistory.delete(sk);
     state.containerStats.delete(sk);
     pollStatuses(state);
 
     const info = state.bottomLogLines.get(sk);
+    if (code !== 0 && code !== null) {
+      if (info) info.action = 'restart_failed';
+      if (state.mode === MODE.LIST) render(state);
+      return;
+    }
+
     if (info) {
       info.action = 'started';
       info.lines = [];
@@ -446,9 +495,14 @@ export function doStop(state: AppState): void {
   state.bottomLogLines.set(sk, { action: 'stopping', service: entry.service, lines: [] });
   render(state);
 
-  child.on('close', () => {
+  child.on('close', (code: number | null) => {
     state.stopping.delete(sk);
-    state.bottomLogLines.delete(sk);
+    if (code !== 0 && code !== null) {
+      const info = state.bottomLogLines.get(sk);
+      if (info) info.action = 'stop_failed';
+    } else {
+      state.bottomLogLines.delete(sk);
+    }
     pollStatuses(state);
     if (state.mode === MODE.LIST) render(state);
   });
@@ -469,11 +523,17 @@ export function doStart(state: AppState): void {
   state.bottomLogLines.set(sk, { action: 'starting', service: entry.service, lines: [] });
   render(state);
 
-  child.on('close', () => {
+  child.on('close', (code: number | null) => {
     state.starting.delete(sk);
     pollStatuses(state);
 
     const info = state.bottomLogLines.get(sk);
+    if (code !== 0 && code !== null) {
+      if (info) info.action = 'start_failed';
+      if (state.mode === MODE.LIST) render(state);
+      return;
+    }
+
     if (info) {
       info.action = 'started';
       info.lines = [];
@@ -660,11 +720,10 @@ function executeCascadeStep(state: AppState, file: string, sk: string, cascade: 
   }
 
   step.status = 'in_progress';
-  const maxLines = state.config.bottomLogCount || 10;
 
   let child: ChildProcess | Killable;
   if (step.action === 'rebuild') {
-    child = rebuildService(file, step.service, { noCache: state.noCache });
+    child = rebuildService(file, step.service, { noCache: state.noCache, noDeps: state.noDeps });
   } else {
     child = restartService(file, step.service);
   }
@@ -680,7 +739,10 @@ function executeCascadeStep(state: AppState, file: string, sk: string, cascade: 
     const newLines = parts.filter(l => l.trim().length > 0).map(stripAnsi).filter(Boolean);
     if (newLines.length === 0) return;
     info.lines.push(...newLines);
-    if (info.lines.length > maxLines) info.lines = info.lines.slice(-maxLines);
+    if (state.mode === MODE.LOGS && state.logBuildKey === sk) {
+      state.logLines.push(...newLines);
+      if (state.logAutoScroll) throttledRender(state);
+    }
     if (state.mode === MODE.LIST) throttledRender(state);
   };
 
@@ -781,13 +843,18 @@ function isCdCommand(cmd: string): string | null {
   return match[2] ? match[2].trim() : '';
 }
 
+export function shellEscape(str: string): string {
+  return "'" + str.replace(/'/g, "'\\''") + "'";
+}
+
 export function runExecCommand(state: AppState): void {
   const cmd = state.execInput.trim();
   if (!cmd || !state.execContainerId) return;
 
-  // Add to history
+  // Add to history (capped at 1000 entries)
   if (state.execHistory.length === 0 || state.execHistory[state.execHistory.length - 1] !== cmd) {
     state.execHistory.push(cmd);
+    if (state.execHistory.length > 1000) state.execHistory.shift();
   }
   state.execHistoryIdx = -1;
   state.execInput = '';
@@ -803,7 +870,7 @@ export function runExecCommand(state: AppState): void {
   // Handle cd commands — resolve new working directory
   const cdTarget = isCdCommand(cmd);
   if (cdTarget !== null) {
-    const resolveCmd = cdTarget ? `cd ${cdTarget} && pwd` : 'cd && pwd';
+    const resolveCmd = cdTarget ? `cd ${shellEscape(cdTarget)} && pwd` : 'cd && pwd';
     const child = execInContainer(state.execContainerId, resolveCmd, state.execCwd || undefined);
     state.execChild = child;
 
@@ -816,7 +883,9 @@ export function runExecCommand(state: AppState): void {
       if (code === 0) {
         const lines = stdout.trim().split('\n');
         const newCwd = lines[lines.length - 1].trim();
-        if (newCwd) state.execCwd = newCwd;
+        if (newCwd && newCwd.startsWith('/') && newCwd.length < 4096 && !/[\x00-\x1f]/.test(newCwd)) {
+          state.execCwd = newCwd;
+        }
       } else {
         const errLines = stderr.trim().split('\n').filter(Boolean);
         for (const line of errLines) {
@@ -872,46 +941,70 @@ export function enterLogs(state: AppState): void {
     moduleState.logFetchTimer = null;
   }
 
+  // Carry over bottom panel search query to full log search
+  const carryQuery = state.bottomSearchQuery || '';
+  clearBottomSearch(state);
+
+  const sk = statusKey(entry.file, entry.service);
+  const info = state.bottomLogLines.get(sk);
+  const isBuilding = state.rebuilding.has(sk) || state.cascading.has(sk);
+  const isBuildFailed = info && info.action === 'build_failed';
+
   state.mode = MODE.LOGS;
   state.logLines = [];
   state.logScrollOffset = 0;
   state.logAutoScroll = true;
-  state.logSearchQuery = '';
+  state.logSearchQuery = carryQuery;
   state.logSearchActive = false;
   state.logSearchMatches = [];
   state.logSearchMatchIdx = -1;
+  state.logFetchedTailCount = 200;
+  state.logHistoryLoaded = false;
+  state.logHistoryLoading = false;
+  state.logSearchPending = !!carryQuery;
+  state.logHistoryChild = null;
 
-  const child = tailLogs(entry.file, entry.service, state.config.logTailLines);
-  state.logChild = child;
-
-  let lineBuf = '';
-  const onData = (data: Buffer): void => {
-    lineBuf += data.toString();
-    const parts = lineBuf.split(/\r?\n|\r/);
-    lineBuf = parts.pop()!;
-    if (parts.length === 0) return;
-    for (const line of parts) {
-      state.logLines.push(stripAnsi(line));
+  if (isBuilding || isBuildFailed) {
+    // Show build output instead of runtime logs
+    state.logBuildKey = sk;
+    if (info) {
+      state.logLines = [...info.lines];
     }
-    if (state.logLines.length > 10000) {
-      const excess = state.logLines.length - 10000;
-      state.logLines.splice(0, excess);
-      if (!state.logAutoScroll) {
-        state.logScrollOffset = Math.max(0, state.logScrollOffset - excess);
+    state.logHistoryLoaded = true;
+  } else {
+    state.logBuildKey = null;
+
+    const child = tailLogs(entry.file, entry.service, 200);
+    state.logChild = child;
+
+    let lineBuf = '';
+    const onData = (data: Buffer): void => {
+      lineBuf += data.toString();
+      const parts = lineBuf.split(/\r?\n|\r/);
+      lineBuf = parts.pop()!;
+      if (parts.length === 0) return;
+      for (const line of parts) {
+        state.logLines.push(stripAnsi(line));
       }
-    }
-    if (state.logAutoScroll) {
-      throttledRender(state);
-    }
-  };
+      if (state.logAutoScroll) {
+        throttledRender(state);
+      }
+    };
 
-  child.stdout!.on('data', onData);
-  child.stderr!.on('data', onData);
-  child.on('close', () => {
-    if (state.logChild === child) {
-      state.logChild = null;
+    child.stdout!.on('data', onData);
+    child.stderr!.on('data', onData);
+    child.on('close', () => {
+      if (state.logChild === child) {
+        state.logChild = null;
+      }
+    });
+
+    // If carrying a search query from bottom panel, load full history to search
+    if (carryQuery) {
+      state.logFetchedTailCount = 5000;
+      loadMoreLogHistory(state);
     }
-  });
+  }
 
   render(state);
 }
@@ -921,10 +1014,74 @@ export function exitLogs(state: AppState): void {
     state.logChild.kill('SIGTERM');
     state.logChild = null;
   }
+  if (state.logHistoryChild) {
+    state.logHistoryChild.kill('SIGTERM');
+    state.logHistoryChild = null;
+  }
   state.logLines = [];
+  state.logBuildKey = null;
+  state.logHistoryLoaded = false;
+  state.logHistoryLoading = false;
+  state.logSearchPending = false;
   state.mode = MODE.LIST;
   pollStatuses(state);
   render(state);
+}
+
+// --- Log History Loading ---
+
+export function loadMoreLogHistory(state: AppState): void {
+  if (state.logHistoryLoaded || state.logHistoryLoading) return;
+
+  const entry = selectedEntry(state);
+  if (!entry) return;
+
+  // Escalate: 200 → 1000 → 5000 → all
+  let nextTail: number | 'all';
+  if (state.logFetchedTailCount < 1000) nextTail = 1000;
+  else if (state.logFetchedTailCount < 5000) nextTail = 5000;
+  else nextTail = 'all';
+
+  state.logHistoryLoading = true;
+  const snapshotLen = state.logLines.length;
+
+  const child = fetchServiceLogs(entry.file, entry.service, nextTail);
+  state.logHistoryChild = child;
+
+  let output = '';
+  child.stdout!.on('data', (d: Buffer) => { output += d.toString(); });
+  child.stderr!.on('data', (d: Buffer) => { output += d.toString(); });
+  child.on('close', () => {
+    if (state.logHistoryChild === child) {
+      state.logHistoryChild = null;
+    }
+    state.logHistoryLoading = false;
+
+    const fetchedLines = output.split(/\r?\n|\r/).filter(l => l.length > 0).map(stripAnsi).filter(Boolean);
+    if (fetchedLines.length <= snapshotLen) {
+      // No more history available
+      state.logHistoryLoaded = true;
+    } else {
+      // Merge: fetched history + any new lines that arrived during the fetch
+      const newLiveLines = state.logLines.slice(snapshotLen);
+      const oldOffset = state.logScrollOffset;
+      const added = fetchedLines.length - snapshotLen;
+      state.logLines = [...fetchedLines, ...newLiveLines];
+      // Adjust scroll offset to maintain visual position
+      if (!state.logAutoScroll) {
+        state.logScrollOffset = oldOffset + added;
+      }
+      state.logFetchedTailCount = nextTail === 'all' ? Infinity : nextTail;
+      if (nextTail === 'all') state.logHistoryLoaded = true;
+    }
+
+    if (state.logSearchPending) {
+      state.logSearchPending = false;
+      executeLogSearch(state);
+    }
+
+    render(state);
+  });
 }
 
 // --- Log Search ---
@@ -953,8 +1110,9 @@ function scrollToLogLine(state: AppState, lineIdx: number): void {
   const headerHeight = 9;
   const availableRows = Math.max(1, rows - headerHeight);
   const totalLines = state.logLines.length;
+  const maxOffset = Math.max(0, totalLines - availableRows);
 
-  state.logScrollOffset = Math.max(0, totalLines - lineIdx - Math.floor(availableRows / 2));
+  state.logScrollOffset = Math.min(maxOffset, Math.max(0, totalLines - lineIdx - Math.floor(availableRows / 2)));
   state.logAutoScroll = state.logScrollOffset === 0;
   render(state);
 }
@@ -969,6 +1127,85 @@ export function jumpToPrevMatch(state: AppState): void {
   if (state.logSearchMatches.length === 0) return;
   state.logSearchMatchIdx = (state.logSearchMatchIdx - 1 + state.logSearchMatches.length) % state.logSearchMatches.length;
   scrollToLogLine(state, state.logSearchMatches[state.logSearchMatchIdx]);
+}
+
+// --- Bottom Panel Search ---
+
+export function executeBottomSearch(state: AppState): void {
+  const entry = selectedEntry(state);
+  if (!entry || !state.bottomSearchQuery) return;
+
+  const sk = statusKey(entry.file, entry.service);
+  const info = state.bottomLogLines.get(sk);
+  if (!info) return;
+
+  // Save current tail lines so we can restore them later
+  if (!state.bottomSearchSavedLines.has(sk)) {
+    state.bottomSearchSavedLines.set(sk, [...info.lines]);
+  }
+
+  // Kill any previous search fetch
+  if (state.bottomSearchChild) {
+    state.bottomSearchChild.kill('SIGTERM');
+    state.bottomSearchChild = null;
+  }
+
+  state.bottomSearchLoading = true;
+  state.bottomSearchTotalMatches = 0;
+  render(state);
+
+  const child = fetchServiceLogs(entry.file, entry.service, 'all');
+  state.bottomSearchChild = child;
+
+  let output = '';
+  child.stdout!.on('data', (d: Buffer) => { output += d.toString(); });
+  child.stderr!.on('data', (d: Buffer) => { output += d.toString(); });
+  child.on('close', () => {
+    if (state.bottomSearchChild !== child) return; // superseded
+    state.bottomSearchChild = null;
+    state.bottomSearchLoading = false;
+
+    const query = state.bottomSearchQuery;
+    if (!query) { clearBottomSearch(state); render(state); return; }
+
+    const lowerQuery = query.toLowerCase();
+    const allLines = output.split(/\r?\n|\r/).filter(l => l.trim().length > 0).map(stripAnsi).filter(Boolean);
+    const matchingLines: string[] = [];
+    for (const line of allLines) {
+      if (line.toLowerCase().includes(lowerQuery)) {
+        matchingLines.push(line);
+      }
+    }
+
+    state.bottomSearchTotalMatches = matchingLines.length;
+
+    // Show the last N matching lines in the bottom panel
+    const maxLines = state.config.bottomLogCount || 10;
+    const currentInfo = state.bottomLogLines.get(sk);
+    if (currentInfo) {
+      currentInfo.lines = matchingLines.slice(-maxLines);
+    }
+
+    if (state.mode === MODE.LIST) render(state);
+  });
+}
+
+export function clearBottomSearch(state: AppState): void {
+  if (state.bottomSearchChild) {
+    state.bottomSearchChild.kill('SIGTERM');
+    state.bottomSearchChild = null;
+  }
+  state.bottomSearchLoading = false;
+  state.bottomSearchTotalMatches = 0;
+
+  // Restore saved tail lines
+  if (state.selectedLogKey && state.bottomSearchSavedLines.has(state.selectedLogKey)) {
+    const info = state.bottomLogLines.get(state.selectedLogKey);
+    if (info) {
+      info.lines = state.bottomSearchSavedLines.get(state.selectedLogKey)!;
+    }
+    state.bottomSearchSavedLines.delete(state.selectedLogKey);
+  }
 }
 
 // --- Input Handling ---
@@ -1036,8 +1273,20 @@ export function handleKeypress(state: AppState, key: string): void {
         render(state);
       } else if (key === '\r') {
         state.logSearchActive = false;
-        executeLogSearch(state);
-        render(state);
+        if (!state.logHistoryLoaded && !state.logHistoryLoading) {
+          // Load all history, then search
+          state.logSearchPending = true;
+          state.logFetchedTailCount = 5000; // jump straight to 'all'
+          loadMoreLogHistory(state);
+          render(state);
+        } else if (state.logHistoryLoading) {
+          // Already loading — search will run when it finishes
+          state.logSearchPending = true;
+          render(state);
+        } else {
+          executeLogSearch(state);
+          render(state);
+        }
       } else if (key === '\x7f' || key === '\b') {
         state.logSearchQuery = state.logSearchQuery.slice(0, -1);
         render(state);
@@ -1050,12 +1299,31 @@ export function handleKeypress(state: AppState, key: string): void {
 
     const rows = process.stdout.rows ?? 24;
     const pageSize = Math.max(1, Math.floor(rows / 2));
-    const maxOffset = Math.max(0, state.logLines.length - 1);
+    const availableRows = Math.max(1, rows - 9);
+    const maxOffset = Math.max(0, state.logLines.length - availableRows);
+
+    // Trigger lazy history load when scrolled near the top
+    const checkLoadMore = (): void => {
+      const availableRows = Math.max(1, rows - 9);
+      const linesFromTop = state.logLines.length - state.logScrollOffset - availableRows;
+      if (linesFromTop < availableRows) {
+        loadMoreLogHistory(state);
+      }
+    };
 
     switch (key) {
       case 'f':
-      case '\x1b':
         exitLogs(state);
+        break;
+      case '\x1b':
+        if (state.logSearchQuery) {
+          state.logSearchQuery = '';
+          state.logSearchMatches = [];
+          state.logSearchMatchIdx = -1;
+          render(state);
+        } else {
+          exitLogs(state);
+        }
         break;
       case 'q':
         cleanup(state);
@@ -1065,6 +1333,7 @@ export function handleKeypress(state: AppState, key: string): void {
       case '\x1b[A':
         state.logAutoScroll = false;
         state.logScrollOffset = Math.min(maxOffset, state.logScrollOffset + 1);
+        checkLoadMore();
         render(state);
         break;
       case 'j':
@@ -1083,6 +1352,7 @@ export function handleKeypress(state: AppState, key: string): void {
       case '\x15': // Ctrl+U
         state.logAutoScroll = false;
         state.logScrollOffset = Math.min(maxOffset, state.logScrollOffset + pageSize);
+        checkLoadMore();
         render(state);
         break;
       case '\x04': // Ctrl+D
@@ -1159,9 +1429,13 @@ export function handleKeypress(state: AppState, key: string): void {
     if (key === '\x1b') {
       state.bottomSearchActive = false;
       state.bottomSearchQuery = '';
+      clearBottomSearch(state);
       render(state);
     } else if (key === '\r') {
       state.bottomSearchActive = false;
+      if (state.bottomSearchQuery) {
+        executeBottomSearch(state);
+      }
       render(state);
     } else if (key === '\x7f' || key === '\b') {
       state.bottomSearchQuery = state.bottomSearchQuery.slice(0, -1);
@@ -1220,6 +1494,10 @@ export function handleKeypress(state: AppState, key: string): void {
       break;
     case 'n':
       state.noCache = !state.noCache;
+      render(state);
+      break;
+    case 'o':
+      state.noDeps = !state.noDeps;
       render(state);
       break;
     case 'f':
@@ -1305,7 +1583,14 @@ export function createInputHandler(state: AppState): (data: Buffer | string) => 
             updateSelectedLogs(state);
           } else if (state.mode === MODE.LOGS) {
             state.logAutoScroll = false;
-            state.logScrollOffset = Math.max(0, state.logLines.length - 1);
+            const ggRows = process.stdout.rows ?? 24;
+            const ggAvailable = Math.max(1, ggRows - 9);
+            state.logScrollOffset = Math.max(0, state.logLines.length - ggAvailable);
+            // Load all history so we can scroll to the very top
+            if (!state.logHistoryLoaded) {
+              state.logFetchedTailCount = 5000; // jump to 'all'
+              loadMoreLogHistory(state);
+            }
           }
           render(state);
           continue;
@@ -1361,6 +1646,10 @@ export function cleanup(state: AppState): void {
     state.execChild = null;
   }
   state.execActive = false;
+  if (state.bottomSearchChild) {
+    state.bottomSearchChild.kill('SIGTERM');
+    state.bottomSearchChild = null;
+  }
   for (const [, child] of state.bottomLogTails) {
     child.kill('SIGTERM');
   }

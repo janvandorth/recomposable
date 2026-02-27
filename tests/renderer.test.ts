@@ -14,6 +14,7 @@ import {
   renderLogView,
   truncateLine,
   highlightSearchInLine,
+  wrapPlainLine,
 } from '../src/lib/renderer';
 import { createTestState, createMockStatus, createMockKillable } from './helpers';
 import { statusKey } from '../src/lib/state';
@@ -24,11 +25,11 @@ function strip(str: string): string {
 }
 
 describe('clearScreen', () => {
-  it('returns escape sequences for clearing screen and hiding cursor', () => {
+  it('returns escape sequences for cursor home and hiding cursor without full clear', () => {
     const result = clearScreen();
-    expect(result).toContain('\x1b[2J');
     expect(result).toContain('\x1b[H');
     expect(result).toContain('\x1b[?25l');
+    expect(result).not.toContain('\x1b[2J');
   });
 });
 
@@ -369,7 +370,7 @@ describe('renderListView', () => {
     expect(text).toContain('file not found');
   });
 
-  it('shows search match info in bottom panel', () => {
+  it('shows search match info in bottom panel from full log', () => {
     const state = createTestState();
     const sk = statusKey(state.groups[0].file, 'postgres');
     state.selectedLogKey = sk;
@@ -380,9 +381,27 @@ describe('renderListView', () => {
     });
     state.bottomSearchQuery = 'error';
     state.bottomSearchActive = false;
+    state.bottomSearchTotalMatches = 42;
     const output = renderListView(state);
     const text = strip(output);
-    expect(text).toContain('search: "error" (2 matches)');
+    expect(text).toContain('search: "error" (42 matches in full log)');
+  });
+
+  it('shows searching indicator while loading', () => {
+    const state = createTestState();
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.selectedLogKey = sk;
+    state.bottomLogLines.set(sk, {
+      action: 'logs',
+      service: 'postgres',
+      lines: ['line 1'],
+    });
+    state.bottomSearchQuery = 'error';
+    state.bottomSearchActive = false;
+    state.bottomSearchLoading = true;
+    const output = renderListView(state);
+    const text = strip(output);
+    expect(text).toContain('searching "error"...');
   });
 
   it('shows rebuilding status for service', () => {
@@ -423,6 +442,137 @@ describe('renderListView', () => {
     // WRN] should be colored (yellow = 33m)
     expect(output).toContain('33m');
     expect(output).toContain('WRN]');
+  });
+
+  it('colors entire line yellow for WRN pattern in bottom panel', () => {
+    const state = createTestState();
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.selectedLogKey = sk;
+    state.bottomLogLines.set(sk, {
+      action: 'logs',
+      service: 'postgres',
+      lines: ['2024-01-01 WRN] something happened'],
+    });
+    const output = renderListView(state);
+    // The line should start with yellow (33m), not gray (90m)
+    expect(output).toContain('\x1b[33m2024-01-01 WRN]');
+  });
+
+  it('colors entire line red for ERR pattern in bottom panel', () => {
+    const state = createTestState();
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.selectedLogKey = sk;
+    state.bottomLogLines.set(sk, {
+      action: 'logs',
+      service: 'postgres',
+      lines: ['2024-01-01 ERR] something broke'],
+    });
+    const output = renderListView(state);
+    // The line should start with red (31m)
+    expect(output).toContain('\x1b[31m2024-01-01 ERR]');
+  });
+
+  it('keeps gray for lines without any pattern in bottom panel', () => {
+    const state = createTestState();
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.selectedLogKey = sk;
+    state.bottomLogLines.set(sk, {
+      action: 'logs',
+      service: 'postgres',
+      lines: ['2024-01-01 INF] all good'],
+    });
+    const output = renderListView(state);
+    // The line should start with gray (90m)
+    expect(output).toContain('\x1b[90m2024-01-01 INF]');
+  });
+});
+
+describe('bottom panel shows limited lines', () => {
+  let originalColumns: number | undefined;
+  let originalRows: number | undefined;
+
+  beforeEach(() => {
+    originalColumns = process.stdout.columns;
+    originalRows = process.stdout.rows;
+    process.stdout.columns = 120;
+    process.stdout.rows = 40;
+  });
+
+  afterEach(() => {
+    process.stdout.columns = originalColumns!;
+    process.stdout.rows = originalRows!;
+  });
+
+  it('shows only last N lines when more lines are stored', () => {
+    const state = createTestState();
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.selectedLogKey = sk;
+    const lines = Array.from({ length: 25 }, (_, i) => `build line ${i + 1}`);
+    state.bottomLogLines.set(sk, {
+      action: 'rebuilding',
+      service: 'postgres',
+      lines,
+    });
+    const output = renderListView(state);
+    const text = strip(output);
+    // Should show last 10 lines (default bottomLogCount)
+    expect(text).toContain('build line 25');
+    expect(text).toContain('build line 16');
+    expect(text).not.toContain('build line 15');
+  });
+});
+
+describe('renderLogView build status header', () => {
+  let originalColumns: number | undefined;
+  let originalRows: number | undefined;
+
+  beforeEach(() => {
+    originalColumns = process.stdout.columns;
+    originalRows = process.stdout.rows;
+    process.stdout.columns = 120;
+    process.stdout.rows = 30;
+  });
+
+  afterEach(() => {
+    process.stdout.columns = originalColumns!;
+    process.stdout.rows = originalRows!;
+  });
+
+  it('shows "rebuilding" header when logBuildKey is set and service is rebuilding', () => {
+    const state = createTestState();
+    state.mode = 'LOGS';
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.logBuildKey = sk;
+    state.rebuilding.set(sk, createMockKillable());
+    state.bottomLogLines.set(sk, { action: 'rebuilding', service: 'postgres', lines: [] });
+    state.logLines = ['build output line'];
+    const output = renderLogView(state);
+    const text = strip(output);
+    expect(text).toContain('rebuilding postgres');
+    expect(text).not.toContain('full logs');
+  });
+
+  it('shows "build failed" header when logBuildKey is set and build failed', () => {
+    const state = createTestState();
+    state.mode = 'LOGS';
+    const sk = statusKey(state.groups[0].file, 'postgres');
+    state.logBuildKey = sk;
+    state.bottomLogLines.set(sk, { action: 'build_failed', service: 'postgres', lines: [] });
+    state.logLines = ['error output'];
+    const output = renderLogView(state);
+    const text = strip(output);
+    expect(text).toContain('build failed postgres');
+    expect(text).not.toContain('full logs');
+  });
+
+  it('shows "full logs" header when logBuildKey is null', () => {
+    const state = createTestState();
+    state.mode = 'LOGS';
+    state.logBuildKey = null;
+    state.logLines = ['runtime log'];
+    const output = renderLogView(state);
+    const text = strip(output);
+    expect(text).toContain('full logs postgres');
   });
 });
 
@@ -472,6 +622,28 @@ describe('highlightSearchInLine', () => {
   });
 });
 
+describe('wrapPlainLine', () => {
+  it('returns short lines unchanged', () => {
+    expect(wrapPlainLine('hello', 80)).toEqual(['hello']);
+  });
+
+  it('wraps long lines into chunks', () => {
+    expect(wrapPlainLine('abcdefghij', 4)).toEqual(['abcd', 'efgh', 'ij']);
+  });
+
+  it('handles exact width', () => {
+    expect(wrapPlainLine('abcd', 4)).toEqual(['abcd']);
+  });
+
+  it('handles empty string', () => {
+    expect(wrapPlainLine('', 80)).toEqual(['']);
+  });
+
+  it('handles width of 0', () => {
+    expect(wrapPlainLine('test', 0)).toEqual(['test']);
+  });
+});
+
 describe('renderLogView', () => {
   let originalColumns: number | undefined;
   let originalRows: number | undefined;
@@ -509,7 +681,7 @@ describe('renderLogView', () => {
     expect(text).toContain('live');
   });
 
-  it('shows paused status when not auto-scrolling', () => {
+  it('shows paused status with percentage when not auto-scrolling', () => {
     const state = createTestState();
     state.mode = 'LOGS';
     state.logAutoScroll = false;
@@ -518,6 +690,28 @@ describe('renderLogView', () => {
     const output = renderLogView(state);
     const text = strip(output);
     expect(text).toContain('paused');
+    expect(text).toContain('line 15 / 20 (75%)');
+  });
+
+  it('shows clear search in legend when search is active', () => {
+    const state = createTestState();
+    state.mode = 'LOGS';
+    state.logLines = ['match here', 'no match'];
+    state.logSearchQuery = 'match';
+    state.logSearchMatches = [0];
+    state.logSearchMatchIdx = 0;
+    const output = renderLogView(state);
+    const text = strip(output);
+    expect(text).toContain('[Esc] clear search');
+  });
+
+  it('shows [Esc] back in legend when no search', () => {
+    const state = createTestState();
+    state.mode = 'LOGS';
+    state.logLines = ['test'];
+    const output = renderLogView(state);
+    const text = strip(output);
+    expect(text).toContain('[Esc] back');
   });
 
   it('shows search match count', () => {
@@ -574,5 +768,53 @@ describe('renderLogView', () => {
     expect(text).toContain('line A');
     expect(text).toContain('line B');
     expect(text).toContain('line C');
+  });
+
+  it('wraps long log lines instead of truncating', () => {
+    process.stdout.columns = 20;
+    const state = createTestState();
+    state.mode = 'LOGS';
+    state.logLines = ['a'.repeat(35)]; // 35 chars, should wrap at 20
+    const output = renderLogView(state);
+    const text = strip(output);
+    // Both the first chunk and the wrapped remainder should appear
+    expect(text).toContain('a'.repeat(20));
+    expect(text).toContain('a'.repeat(15));
+  });
+
+  it('shows loading history indicator', () => {
+    const state = createTestState();
+    state.mode = 'LOGS';
+    state.logLines = ['test'];
+    state.logHistoryLoading = true;
+    const output = renderLogView(state);
+    const text = strip(output);
+    expect(text).toContain('loading history...');
+  });
+
+  it('colors WRN lines yellow in full log view', () => {
+    const state = createTestState();
+    state.mode = 'LOGS';
+    state.logLines = ['2024-01-01 WRN] something happened'];
+    const output = renderLogView(state);
+    expect(output).toContain('\x1b[33m2024-01-01 WRN]');
+  });
+
+  it('colors ERR lines red in full log view', () => {
+    const state = createTestState();
+    state.mode = 'LOGS';
+    state.logLines = ['2024-01-01 ERR] something broke'];
+    const output = renderLogView(state);
+    expect(output).toContain('\x1b[31m2024-01-01 ERR]');
+  });
+
+  it('does not color normal lines in full log view', () => {
+    const state = createTestState();
+    state.mode = 'LOGS';
+    state.logLines = ['2024-01-01 INF] all good'];
+    const output = renderLogView(state);
+    // Should not contain yellow or red color codes wrapping the line
+    expect(output).not.toContain('\x1b[33m2024-01-01 INF]');
+    expect(output).not.toContain('\x1b[31m2024-01-01 INF]');
   });
 });

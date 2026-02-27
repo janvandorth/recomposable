@@ -37,7 +37,24 @@ export function padVisibleStart(str: string, width: number): string {
   return ' '.repeat(pad) + str;
 }
 
+export const CLEAR_EOL = `${ESC}K`;
+export const CLEAR_EOS = `${ESC}J`;
+
 const PATTERN_COLORS = [FG_YELLOW, FG_RED, FG_CYAN, FG_WHITE];
+
+function logLineColor(line: string, patterns: string[]): string | null {
+  let color: string | null = null;
+  for (let pi = 0; pi < patterns.length; pi++) {
+    if (line.includes(patterns[pi])) {
+      color = PATTERN_COLORS[pi % PATTERN_COLORS.length];
+    }
+  }
+  return color;
+}
+
+// Cached separator line — recomputed only when terminal width changes
+let cachedSepColumns = 0;
+let cachedSepLine = '';
 
 function patternLabel(pattern: string): string {
   return pattern.replace(/^[\[\(\{<]/, '').replace(/[\]\)\}>]$/, '');
@@ -65,7 +82,15 @@ export function relativeTime(ts: string | null | undefined): string {
 }
 
 export function clearScreen(): string {
-  return `${ESC}2J${ESC}H${ESC}?25l`;
+  return `${ESC}H${ESC}?25l`;
+}
+
+function separatorLine(columns: number): string {
+  if (columns !== cachedSepColumns) {
+    cachedSepColumns = columns;
+    cachedSepLine = ` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`;
+  }
+  return cachedSepLine;
 }
 
 export function showCursor(): string {
@@ -115,7 +140,7 @@ export function formatMem(bytes: number): string {
 }
 
 export function renderLegend(opts: LegendOptions = {}): string {
-  const { logPanelActive = false, logsScrollMode = false, noCacheActive = false, watchActive = false, execMode = false, execInline = false } = opts;
+  const { logPanelActive = false, logsScrollMode = false, noCacheActive = false, noDepsActive = false, watchActive = false, execMode = false, execInline = false } = opts;
   const item = (text: string, active: boolean): string => {
     if (active) return `${BG_HIGHLIGHT} ${text} ${RESET}`;
     return `${DIM}${text}${RESET}`;
@@ -140,8 +165,9 @@ export function renderLegend(opts: LegendOptions = {}): string {
     ].join('  ');
   }
   if (logsScrollMode) {
+    const hasSearch = opts.hasLogSearch || false;
     return [
-      item('[Esc] back', false),
+      item(hasSearch ? '[Esc] clear search' : '[Esc] back', false),
       item('[j/k] scroll', false),
       item('[G] bottom', false),
       item('[gg] top', false),
@@ -157,6 +183,7 @@ export function renderLegend(opts: LegendOptions = {}): string {
     item('Sto[P]', false),
     item('[W]atch', watchActive),
     item('[N]o cache', noCacheActive),
+    item('n[O] deps', noDepsActive),
     item('[e]xec', false),
     item('[F]ull logs', false),
     item('[L]og panel', logPanelActive),
@@ -168,6 +195,7 @@ export function renderListView(state: AppState): string {
   const columns = process.stdout.columns ?? 80;
   const rows = process.stdout.rows ?? 24;
   const patterns = state.config.logScanPatterns || [];
+  const sep = separatorLine(columns);
   const buf: string[] = [];
 
   for (const line of LOGO) {
@@ -176,15 +204,15 @@ export function renderListView(state: AppState): string {
   const watchActive = state.watching.size > 0;
   const help = state.execActive
     ? renderLegend({ execInline: true })
-    : renderLegend({ logPanelActive: state.showBottomLogs, noCacheActive: state.noCache, watchActive });
-  buf.push(` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`);
+    : renderLegend({ logPanelActive: state.showBottomLogs, noCacheActive: state.noCache, noDepsActive: state.noDeps, watchActive });
+  buf.push(sep);
   buf.push(` ${help}`);
 
   const headerHeight = buf.length;
 
   const bottomBuf: string[] = [];
   if (state.execActive && state.execService) {
-    bottomBuf.push(` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`);
+    bottomBuf.push(sep);
     const runningIndicator = state.execChild ? `${FG_YELLOW}running${RESET}` : `${FG_GREEN}ready${RESET}`;
     const cwdInfo = state.execCwd ? `  ${DIM}${state.execCwd}${RESET}` : '';
     bottomBuf.push(` ${FG_CYAN}exec ${BOLD}${state.execService}${RESET}  ${runningIndicator}${cwdInfo}`);
@@ -202,7 +230,7 @@ export function renderListView(state: AppState): string {
       // Check for cascade progress
       const cascade = state.cascading.get(sk);
       if (cascade) {
-        bottomBuf.push(` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`);
+        bottomBuf.push(sep);
         bottomBuf.push(` ${FG_YELLOW}cascading ${BOLD}${selEntry.service}${RESET}`);
         for (let si = 0; si < cascade.steps.length; si++) {
           const step = cascade.steps[si];
@@ -220,24 +248,38 @@ export function renderListView(state: AppState): string {
       const info = state.bottomLogLines.get(sk);
       if (info) {
         if (!cascade) {
-          bottomBuf.push(` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`);
+          bottomBuf.push(sep);
         }
-        const actionColor = info.action === 'rebuilding' || info.action === 'restarting' || info.action === 'stopping' || info.action === 'starting' || info.action === 'cascading' ? FG_YELLOW
+        const isFailed = info.action === 'build_failed' || info.action === 'restart_failed' || info.action === 'stop_failed' || info.action === 'start_failed';
+        const actionColor = isFailed ? FG_RED
+          : info.action === 'rebuilding' || info.action === 'restarting' || info.action === 'stopping' || info.action === 'starting' || info.action === 'cascading' ? FG_YELLOW
           : info.action === 'watching' ? FG_CYAN : FG_GREEN;
-        let headerLine = ` ${actionColor}${info.action} ${BOLD}${info.service}${RESET}`;
+        const actionLabel = isFailed ? info.action.replace('_', ' ').toUpperCase() : info.action;
+        let headerLine = ` ${actionColor}${actionLabel} ${BOLD}${info.service}${RESET}`;
         const bq = state.bottomSearchQuery || '';
         if (bq && !state.bottomSearchActive) {
-          const matchCount = info.lines.filter(l => l.toLowerCase().includes(bq.toLowerCase())).length;
-          headerLine += matchCount > 0
-            ? `  ${DIM}search: "${bq}" (${matchCount} match${matchCount !== 1 ? 'es' : ''})${RESET}`
-            : `  ${FG_RED}search: "${bq}" (no matches)${RESET}`;
+          if (state.bottomSearchLoading) {
+            headerLine += `  ${FG_YELLOW}searching "${bq}"...${RESET}`;
+          } else {
+            const totalMatches = state.bottomSearchTotalMatches;
+            headerLine += totalMatches > 0
+              ? `  ${DIM}search: "${bq}" (${totalMatches} match${totalMatches !== 1 ? 'es' : ''} in full log)${RESET}`
+              : `  ${FG_RED}search: "${bq}" (no matches)${RESET}`;
+          }
         }
         bottomBuf.push(headerLine);
 
-        const searchQuery = bq && !state.bottomSearchActive ? bq : '';
+        if (info.lines.length === 0 && info.action === 'logs') {
+          bottomBuf.push(`  ${DIM}loading...${RESET}`);
+        }
 
-        for (const line of info.lines) {
+        const searchQuery = bq && !state.bottomSearchActive ? bq : '';
+        const maxBottomLines = state.config.bottomLogCount || 10;
+        const visibleLines = info.lines.slice(-maxBottomLines);
+
+        for (const line of visibleLines) {
           let coloredLine = line.substring(0, columns - 4);
+          const lineColor = logLineColor(coloredLine, patterns) || FG_GRAY;
           if (searchQuery) {
             const lowerLine = coloredLine.toLowerCase();
             const lowerQ = searchQuery.toLowerCase();
@@ -248,20 +290,13 @@ export function renderListView(state: AppState): string {
                 const idx = lowerLine.indexOf(lowerQ, pos);
                 if (idx === -1) { result += coloredLine.substring(pos); break; }
                 result += coloredLine.substring(pos, idx);
-                result += `${REVERSE}${FG_YELLOW}${coloredLine.substring(idx, idx + searchQuery.length)}${RESET}${FG_GRAY}`;
+                result += `${REVERSE}${FG_YELLOW}${coloredLine.substring(idx, idx + searchQuery.length)}${RESET}${lineColor}`;
                 pos = idx + searchQuery.length;
               }
               coloredLine = result;
             }
           }
-          for (let pi = 0; pi < patterns.length; pi++) {
-            const p = patterns[pi];
-            if (coloredLine.includes(p)) {
-              const color = PATTERN_COLORS[pi % PATTERN_COLORS.length];
-              coloredLine = coloredLine.split(p).join(`${color}${p}${RESET}${FG_GRAY}`);
-            }
-          }
-          bottomBuf.push(`  ${FG_GRAY}${coloredLine}${RESET}`);
+          bottomBuf.push(`  ${lineColor}${coloredLine}${RESET}`);
         }
 
         if (state.bottomSearchActive) {
@@ -272,7 +307,8 @@ export function renderListView(state: AppState): string {
   }
   const bottomHeight = bottomBuf.length;
 
-  const lines: DisplayLine[] = [];
+  // Pass 1: build lightweight stubs (type + index only, no text computation)
+  const stubs: Array<{ type: 'blank' | 'header' | 'colheader' | 'service'; flatIdx: number; groupIdx: number }> = [];
   let currentGroup = -1;
 
   for (let i = 0; i < state.flatList.length; i++) {
@@ -280,96 +316,109 @@ export function renderListView(state: AppState): string {
 
     if (entry.groupIdx !== currentGroup) {
       currentGroup = entry.groupIdx;
-      const group = state.groups[entry.groupIdx];
-      if (lines.length > 0) lines.push({ type: 'blank', text: '' });
-      const label = ` ${BOLD}${group.label}${RESET}`;
-      if (group.error) {
-        lines.push({ type: 'header', text: `${label}  ${FG_RED}(${group.error})${RESET}` });
-      } else {
-        lines.push({ type: 'header', text: label });
-      }
-      let colHeader = `${DIM}     ${'SERVICE'.padEnd(24)} ${'STATUS'.padEnd(22)} ${'BUILT'.padEnd(12)} ${'RESTARTED'.padEnd(12)}`;
-      for (const p of patterns) colHeader += patternLabel(p).padStart(5) + ' ';
-      colHeader += `   ${'CPU/MEM'.padStart(16)} ${'PORTS'.padEnd(14)}`;
-      lines.push({ type: 'colheader', text: colHeader + RESET });
+      if (stubs.length > 0) stubs.push({ type: 'blank', flatIdx: -1, groupIdx: entry.groupIdx });
+      stubs.push({ type: 'header', flatIdx: -1, groupIdx: entry.groupIdx });
+      stubs.push({ type: 'colheader', flatIdx: -1, groupIdx: entry.groupIdx });
     }
 
-    const sk = statusKey(entry.file, entry.service);
-    const st = state.statuses.get(sk);
-    const rebuilding = state.rebuilding.has(sk);
-    const restarting = state.restarting.has(sk);
-    const stopping = state.stopping.has(sk);
-    const starting = state.starting.has(sk);
-    const isWatching = state.watching.has(sk);
-    const isCascading = state.cascading.has(sk);
-    const icon = statusIcon(st, rebuilding || isCascading, restarting, stopping, starting);
-    const stext = statusText(st, rebuilding || isCascading, restarting, stopping, starting);
-    const watchIndicator = isWatching ? `${FG_CYAN}W${RESET}` : ' ';
-    const name = entry.service.padEnd(24);
-    const statusPadded = padVisible(stext, 22);
-
-    let cpuMemStr: string;
-    const stats = state.containerStats ? state.containerStats.get(sk) : null;
-    if (stats && st && st.state === 'running') {
-      const cpu = stats.cpuPercent;
-      const mem = stats.memUsageBytes;
-      const cpuWarn = state.config.cpuWarnThreshold || 50;
-      const cpuDanger = state.config.cpuDangerThreshold || 100;
-      const memWarn = (state.config.memWarnThreshold || 512) * 1024 * 1024;
-      const memDanger = (state.config.memDangerThreshold || 1024) * 1024 * 1024;
-      let color = DIM;
-      if (cpu > cpuDanger || mem > memDanger) color = FG_RED;
-      else if (cpu > cpuWarn || mem > memWarn) color = FG_YELLOW;
-      const cpuText = cpu.toFixed(1) + '%';
-      const memText = formatMem(mem);
-      cpuMemStr = padVisible(`${color}${cpuText} / ${memText}${RESET}`, 16);
-    } else {
-      cpuMemStr = padVisible(`${DIM}-${RESET}`, 16);
-    }
-
-    let portsStr: string;
-    if (st && st.ports && st.ports.length > 0) {
-      const portsText = st.ports.map(p => p.published).join(' ');
-      portsStr = padVisible(`${DIM}${portsText}${RESET}`, 14);
-    } else {
-      portsStr = padVisible(`${DIM}-${RESET}`, 14);
-    }
-
-    const built = padVisible(relativeTime(st ? st.createdAt : null), 12);
-    const restarted = padVisible(relativeTime(st ? st.startedAt : null), 12);
-    const pointer = i === state.cursor ? `${REVERSE}` : '';
-    const endPointer = i === state.cursor ? `${RESET}` : '';
-
-    let countsStr = '';
-    const logCounts = state.logCounts.get(sk);
-    for (let pi = 0; pi < patterns.length; pi++) {
-      const count = logCounts ? (logCounts.get(patterns[pi]) || 0) : 0;
-      const color = count > 0 ? PATTERN_COLORS[pi % PATTERN_COLORS.length] : DIM;
-      const countText = count > 0 ? `${color}${count}${RESET}` : `${color}-${RESET}`;
-      countsStr += padVisibleStart(countText, 5) + ' ';
-    }
-
-    lines.push({
-      type: 'service',
-      text: `${pointer}  ${watchIndicator}${icon} ${FG_WHITE}${name}${RESET} ${statusPadded} ${built} ${restarted}${countsStr}  ${cpuMemStr} ${portsStr}${endPointer}`,
-      flatIdx: i,
-    });
+    stubs.push({ type: 'service', flatIdx: i, groupIdx: entry.groupIdx });
   }
 
   const availableRows = Math.max(3, rows - headerHeight - bottomHeight);
 
-  const cursorLineIdx = lines.findIndex(l => l.type === 'service' && l.flatIdx === state.cursor);
+  // Find cursor position in stubs
+  const cursorStubIdx = stubs.findIndex(s => s.type === 'service' && s.flatIdx === state.cursor);
 
-  if (cursorLineIdx < state.scrollOffset) {
-    state.scrollOffset = cursorLineIdx;
-  } else if (cursorLineIdx >= state.scrollOffset + availableRows) {
-    state.scrollOffset = cursorLineIdx - availableRows + 1;
+  if (cursorStubIdx < state.scrollOffset) {
+    state.scrollOffset = cursorStubIdx;
+  } else if (cursorStubIdx >= state.scrollOffset + availableRows) {
+    state.scrollOffset = cursorStubIdx - availableRows + 1;
   }
-  state.scrollOffset = Math.max(0, Math.min(lines.length - availableRows, state.scrollOffset));
+  state.scrollOffset = Math.max(0, Math.min(stubs.length - availableRows, state.scrollOffset));
 
-  const visible = lines.slice(state.scrollOffset, state.scrollOffset + availableRows);
-  for (const line of visible) {
-    buf.push(line.text || '');
+  // Pass 2: render text only for visible stubs
+  const visEnd = Math.min(stubs.length, state.scrollOffset + availableRows);
+  for (let si = state.scrollOffset; si < visEnd; si++) {
+    const stub = stubs[si];
+    switch (stub.type) {
+      case 'blank':
+        buf.push('');
+        break;
+      case 'header': {
+        const group = state.groups[stub.groupIdx];
+        const label = ` ${BOLD}${group.label}${RESET}`;
+        buf.push(group.error ? `${label}  ${FG_RED}(${group.error})${RESET}` : label);
+        break;
+      }
+      case 'colheader': {
+        let colHeader = `${DIM}     ${'SERVICE'.padEnd(24)} ${'STATUS'.padEnd(22)} ${'BUILT'.padEnd(12)} ${'RESTARTED'.padEnd(12)}`;
+        for (const p of patterns) colHeader += patternLabel(p).padStart(5) + ' ';
+        colHeader += `   ${'CPU/MEM'.padStart(16)} ${'PORTS'.padEnd(14)}`;
+        buf.push(colHeader + RESET);
+        break;
+      }
+      case 'service': {
+        const i = stub.flatIdx;
+        const entry = state.flatList[i];
+        const sk = statusKey(entry.file, entry.service);
+        const st = state.statuses.get(sk);
+        const rebuilding = state.rebuilding.has(sk);
+        const restarting = state.restarting.has(sk);
+        const stopping = state.stopping.has(sk);
+        const starting = state.starting.has(sk);
+        const isWatching = state.watching.has(sk);
+        const isCascading = state.cascading.has(sk);
+        const icon = statusIcon(st, rebuilding || isCascading, restarting, stopping, starting);
+        const stext = statusText(st, rebuilding || isCascading, restarting, stopping, starting);
+        const watchIndicator = isWatching ? `${FG_CYAN}W${RESET}` : ' ';
+        const name = entry.service.padEnd(24);
+        const statusPadded = padVisible(stext, 22);
+
+        let cpuMemStr: string;
+        const stats = state.containerStats ? state.containerStats.get(sk) : null;
+        if (stats && st && st.state === 'running') {
+          const cpu = stats.cpuPercent;
+          const mem = stats.memUsageBytes;
+          const cpuWarn = state.config.cpuWarnThreshold || 50;
+          const cpuDanger = state.config.cpuDangerThreshold || 100;
+          const memWarn = (state.config.memWarnThreshold || 512) * 1024 * 1024;
+          const memDanger = (state.config.memDangerThreshold || 1024) * 1024 * 1024;
+          let color = DIM;
+          if (cpu > cpuDanger || mem > memDanger) color = FG_RED;
+          else if (cpu > cpuWarn || mem > memWarn) color = FG_YELLOW;
+          const cpuText = cpu.toFixed(1) + '%';
+          const memText = formatMem(mem);
+          cpuMemStr = padVisible(`${color}${cpuText} / ${memText}${RESET}`, 16);
+        } else {
+          cpuMemStr = padVisible(`${DIM}-${RESET}`, 16);
+        }
+
+        let portsStr: string;
+        if (st && st.ports && st.ports.length > 0) {
+          const portsText = st.ports.map(p => p.published).join(' ');
+          portsStr = padVisible(`${DIM}${portsText}${RESET}`, 14);
+        } else {
+          portsStr = padVisible(`${DIM}-${RESET}`, 14);
+        }
+
+        const built = padVisible(relativeTime(st ? st.createdAt : null), 12);
+        const restarted = padVisible(relativeTime(st ? st.startedAt : null), 12);
+        const pointer = i === state.cursor ? `${REVERSE}` : '';
+        const endPointer = i === state.cursor ? `${RESET}` : '';
+
+        let countsStr = '';
+        const logCounts = state.logCounts.get(sk);
+        for (let pi = 0; pi < patterns.length; pi++) {
+          const count = logCounts ? (logCounts.get(patterns[pi]) || 0) : 0;
+          const color = count > 0 ? PATTERN_COLORS[pi % PATTERN_COLORS.length] : DIM;
+          const countText = count > 0 ? `${color}${count}${RESET}` : `${color}-${RESET}`;
+          countsStr += padVisibleStart(countText, 5) + ' ';
+        }
+
+        buf.push(`${pointer}  ${watchIndicator}${icon} ${FG_WHITE}${name}${RESET} ${statusPadded} ${built} ${restarted}${countsStr}  ${cpuMemStr} ${portsStr}${endPointer}`);
+        break;
+      }
+    }
   }
 
   const usedLines = buf.length + bottomHeight;
@@ -380,7 +429,7 @@ export function renderListView(state: AppState): string {
 
   buf.push(...bottomBuf);
 
-  return buf.join('\n');
+  return buf.join(CLEAR_EOL + '\n');
 }
 
 export function truncateLine(str: string, maxWidth: number): string {
@@ -402,10 +451,11 @@ export function truncateLine(str: string, maxWidth: number): string {
   return str;
 }
 
-export function highlightSearchInLine(line: string, query: string): string {
+export function highlightSearchInLine(line: string, query: string, baseColor?: string): string {
   if (!query) return line;
   const lowerLine = line.toLowerCase();
   const lowerQuery = query.toLowerCase();
+  const restore = baseColor || '';
   let result = '';
   let pos = 0;
   while (pos < line.length) {
@@ -415,8 +465,17 @@ export function highlightSearchInLine(line: string, query: string): string {
       break;
     }
     result += line.substring(pos, idx);
-    result += `${REVERSE}${FG_YELLOW}${line.substring(idx, idx + query.length)}${RESET}`;
+    result += `${REVERSE}${FG_YELLOW}${line.substring(idx, idx + query.length)}${RESET}${restore}`;
     pos = idx + query.length;
+  }
+  return result;
+}
+
+export function wrapPlainLine(line: string, width: number): string[] {
+  if (width <= 0 || line.length <= width) return [line];
+  const result: string[] = [];
+  for (let i = 0; i < line.length; i += width) {
+    result.push(line.substring(i, i + width));
   }
   return result;
 }
@@ -429,20 +488,41 @@ export function renderLogView(state: AppState): string {
   for (const line of LOGO) {
     buf.push(line);
   }
-  buf.push(` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`);
-  buf.push(` ${renderLegend({ logsScrollMode: true })}`);
+  buf.push(separatorLine(columns));
+  const hasLogSearch = !!state.logSearchQuery && !state.logSearchActive;
+  buf.push(` ${renderLegend({ logsScrollMode: true, hasLogSearch })}`);
 
   const entry = state.flatList[state.cursor];
   const serviceName = entry ? entry.service : '???';
   const totalLines = state.logLines.length;
 
-  let statusLine = ` ${FG_GREEN}full logs ${BOLD}${serviceName}${RESET}`;
-  const scrollStatus = state.logAutoScroll
-    ? `${FG_GREEN}live${RESET}`
-    : `${FG_YELLOW}paused ${DIM}line ${Math.max(1, totalLines - state.logScrollOffset)} / ${totalLines}${RESET}`;
+  let statusLine: string;
+  if (state.logBuildKey) {
+    const buildInfo = state.bottomLogLines.get(state.logBuildKey);
+    const isBuilding = state.rebuilding.has(state.logBuildKey) || state.cascading.has(state.logBuildKey);
+    if (buildInfo && buildInfo.action === 'build_failed') {
+      statusLine = ` ${FG_RED}build failed ${BOLD}${serviceName}${RESET}`;
+    } else if (isBuilding) {
+      statusLine = ` ${FG_YELLOW}rebuilding ${BOLD}${serviceName}${RESET}`;
+    } else {
+      statusLine = ` ${FG_GREEN}build logs ${BOLD}${serviceName}${RESET}`;
+    }
+  } else {
+    statusLine = ` ${FG_GREEN}full logs ${BOLD}${serviceName}${RESET}`;
+  }
+  let scrollStatus: string;
+  if (state.logAutoScroll) {
+    scrollStatus = `${FG_GREEN}live${RESET}`;
+  } else {
+    const currentLine = Math.max(1, totalLines - state.logScrollOffset);
+    const pct = totalLines > 0 ? Math.round((currentLine / totalLines) * 100) : 100;
+    scrollStatus = `${FG_YELLOW}paused ${DIM}line ${currentLine} / ${totalLines} (${pct}%)${RESET}`;
+  }
   statusLine += `  ${scrollStatus}`;
 
-  if (state.logSearchQuery && state.logSearchMatches.length > 0) {
+  if (state.logSearchPending || state.logHistoryLoading) {
+    statusLine += `  ${FG_YELLOW}loading history...${RESET}`;
+  } else if (state.logSearchQuery && state.logSearchMatches.length > 0) {
     statusLine += `  ${DIM}match ${state.logSearchMatchIdx + 1}/${state.logSearchMatches.length}${RESET}`;
   } else if (state.logSearchQuery && state.logSearchMatches.length === 0) {
     statusLine += `  ${FG_RED}no matches${RESET}`;
@@ -457,20 +537,41 @@ export function renderLogView(state: AppState): string {
   if (state.logAutoScroll || state.logScrollOffset === 0) {
     endLine = totalLines;
   } else {
-    endLine = Math.max(0, totalLines - state.logScrollOffset);
+    endLine = Math.max(Math.min(availableRows, totalLines), totalLines - state.logScrollOffset);
   }
-  const startLine = Math.max(0, endLine - availableRows);
+
+  if (totalLines === 0) {
+    buf.push(`  ${DIM}loading...${RESET}`);
+  }
 
   const searchQuery = state.logSearchQuery || '';
   const matchSet = searchQuery ? new Set(state.logSearchMatches) : null;
+  const patterns = state.config.logScanPatterns || [];
 
-  for (let i = startLine; i < endLine; i++) {
-    let line = state.logLines[i];
-    if (matchSet && matchSet.has(i)) {
-      line = highlightSearchInLine(line, searchQuery);
+  // Build display lines by wrapping log lines, working backwards from endLine
+  const displayLines: string[] = [];
+  for (let i = endLine - 1; i >= 0 && displayLines.length < availableRows; i--) {
+    const line = state.logLines[i];
+    const wrapped = wrapPlainLine(line, columns);
+    const isMatch = matchSet && matchSet.has(i);
+    const lineColor = logLineColor(line, patterns);
+    for (let w = wrapped.length - 1; w >= 0; w--) {
+      let segment = wrapped[w];
+      if (isMatch) {
+        segment = highlightSearchInLine(segment, searchQuery, lineColor || undefined);
+      }
+      if (lineColor) {
+        segment = `${lineColor}${segment}${RESET}`;
+      }
+      displayLines.push(segment);
     }
-    buf.push(truncateLine(line, columns));
   }
+  displayLines.reverse();
+  // Trim to fit available rows (keep the bottom portion)
+  const trimmed = displayLines.length > availableRows
+    ? displayLines.slice(displayLines.length - availableRows)
+    : displayLines;
+  buf.push(...trimmed);
 
   const targetRows = rows - bottomReserved;
   for (let i = buf.length; i < targetRows; i++) {
@@ -481,7 +582,7 @@ export function renderLogView(state: AppState): string {
     buf.push(`${BOLD}/${RESET}${state.logSearchQuery}${BOLD}_${RESET}`);
   }
 
-  return buf.join('\n');
+  return buf.join(CLEAR_EOL + '\n');
 }
 
 export function renderExecView(state: AppState): string {
@@ -492,7 +593,7 @@ export function renderExecView(state: AppState): string {
   for (const line of LOGO) {
     buf.push(line);
   }
-  buf.push(` ${FG_GRAY}${'\u2500'.repeat(Math.max(0, columns - 2))}${RESET}`);
+  buf.push(separatorLine(columns));
   buf.push(` ${renderLegend({ execMode: true })}`);
 
   const serviceName = state.execService || '???';
@@ -520,5 +621,5 @@ export function renderExecView(state: AppState): string {
   // Command prompt
   buf.push(`${FG_GREEN}$ ${RESET}${state.execInput}${BOLD}_${RESET}`);
 
-  return buf.join('\n');
+  return buf.join(CLEAR_EOL + '\n');
 }

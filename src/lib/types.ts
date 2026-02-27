@@ -94,7 +94,7 @@ export interface FlatEntry {
 
 // --- Bottom log panel ---
 
-export type BottomLogAction = 'logs' | 'rebuilding' | 'restarting' | 'stopping' | 'starting' | 'started' | 'watching' | 'cascading' | 'exec';
+export type BottomLogAction = 'logs' | 'rebuilding' | 'restarting' | 'stopping' | 'starting' | 'started' | 'watching' | 'cascading' | 'exec' | 'build_failed' | 'restart_failed' | 'stop_failed' | 'start_failed';
 
 // --- Dependency graph ---
 
@@ -138,6 +138,7 @@ export interface AppState {
   logChild: ChildProcess | null;
   scrollOffset: number;
   noCache: boolean;
+  noDeps: boolean;
   showBottomLogs: boolean;
   bottomLogLines: Map<string, BottomLogInfo>;
   bottomLogTails: Map<string, Killable>;
@@ -150,8 +151,18 @@ export interface AppState {
   logSearchActive: boolean;
   logSearchMatches: number[];
   logSearchMatchIdx: number;
+  logFetchedTailCount: number;
+  logHistoryLoaded: boolean;
+  logHistoryLoading: boolean;
+  logSearchPending: boolean;
+  logBuildKey: string | null;
+  logHistoryChild: ChildProcess | null;
   bottomSearchQuery: string;
   bottomSearchActive: boolean;
+  bottomSearchLoading: boolean;
+  bottomSearchChild: ChildProcess | null;
+  bottomSearchTotalMatches: number;
+  bottomSearchSavedLines: Map<string, string[]>;
   // Watch
   watching: Map<string, Killable>;
   watchAvailable: boolean | null;
@@ -180,7 +191,9 @@ export interface LegendOptions {
   logPanelActive?: boolean;
   fullLogsActive?: boolean;
   logsScrollMode?: boolean;
+  hasLogSearch?: boolean;
   noCacheActive?: boolean;
+  noDepsActive?: boolean;
   watchActive?: boolean;
   execMode?: boolean;
   execInline?: boolean;
@@ -228,4 +241,5 @@ export interface DockerStatsJson {
 
 export interface RebuildOptions {
   noCache?: boolean;
+  noDeps?: boolean;
 }
