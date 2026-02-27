@@ -1,6 +1,6 @@
 {
   "name": "recomposable",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "description": "Docker Compose TUI manager with vim keybindings — monitor, restart, rebuild, and tail logs for your services",
   "main": "dist/index.js",
   "bin": {
