@@ -530,8 +530,8 @@ describe('renderListView', () => {
     const sk = statusKey(state.groups[0].file, 'postgres');
     state.statuses.set(sk, createMockStatus({ worktree: 'main' }));
     const output = renderListView(state);
-    // Worktree column should use DIM (2m) for main
-    expect(output).toContain('\x1b[2mmain');
+    // Worktree column on selected row promotes DIM to white (37m)
+    expect(output).toContain('\x1b[37mmain');
   });
 
   it('highlights entire selected row with background color', () => {

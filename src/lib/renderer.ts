@@ -452,7 +452,9 @@ export function renderListView(state: AppState): string {
 
         let row = `  ${watchIndicator}${icon} ${FG_WHITE}${name}${RESET} ${statusPadded} ${built} ${restarted}${countsStr}  ${cpuMemStr} ${portsStr}${worktreeCol}`;
         if (isSelected) {
-          // Re-apply BG after every RESET so highlight spans the full row
+          // Re-apply BG after every RESET so highlight spans the full row;
+          // promote dim/gray text to white so it's readable on the highlight background
+          row = row.replace(/\x1b\[2m/g, FG_WHITE).replace(/\x1b\[90m/g, FG_WHITE);
           row = `${BG_HIGHLIGHT}${row.replace(/\x1b\[0m/g, `${RESET}${BG_HIGHLIGHT}`)}${' '.repeat(Math.max(0, columns - visLen(row)))}${RESET}`;
         }
         buf.push(row);

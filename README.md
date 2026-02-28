@@ -6,7 +6,7 @@ Eliminate switching between countless terminal tabs or windows to rebuild you do
 
 Zero dependencies. Pure Node.js.
 
-![recomposable list view](screenshots/list-view.png)
+![recomposable demo](screenshots/demo.gif)
 
 ## Install
 
