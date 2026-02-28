@@ -198,6 +198,10 @@ recomposable -f docker-compose.yml -f docker-compose.prod.yml
 - Node.js >= 16
 - Docker with `docker compose` (v2) CLI
 
+## BLog posts
+- https://dev.to/janvandorth/every-docker-compose-tui-i-could-find-and-why-i-built-my-own-2oo0
+- https://dev.to/janvandorth/testing-microservice-changes-from-git-worktrees-end-to-end-without-the-terminal-tab-explosion-e1f
+
 ## License
 
 MIT
