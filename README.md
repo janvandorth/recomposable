@@ -75,6 +75,8 @@ Press `t` on any service to switch it to a different git worktree. A picker show
 
 This is useful for end-to-end testing changes across branches without drowning in terminal tabs. Run your main stack on `main`, then switch individual services to feature branches to verify their behavior in the full environment. Particularly handy when letting Claude Code work in worktrees — switch the affected service, verify it end-to-end, and switch back, all from a single terminal.
 
+![recomposable worktree gif](screenshots/worktree.gif)
+
 ## Adding Compose Files
 
 Create a `recomposable.json` file in your project root:
