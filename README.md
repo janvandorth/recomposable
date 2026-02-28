@@ -1,6 +1,6 @@
 # recomposable
 
-A lightweight Docker Compose TUI manager with vim keybindings. Monitor service status, restart or rebuild containers, and tail logs — all from your terminal.
+A lightweight Docker Compose TUI manager with vim keybindings. Monitor service status, restart and/or rebuild services, switch workspaces for individual services and tail logs — all from your terminal.
 
 Eliminate switching between countless terminal tabs or windows to rebuild you docker compose containers.
 
