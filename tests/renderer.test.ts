@@ -250,13 +250,13 @@ describe('renderLegend', () => {
 
   it('highlights active indicators', () => {
     const result = renderLegend({ noCacheActive: true });
-    // Active items use BG_HIGHLIGHT
-    expect(result).toContain('48;5;237m');
+    // Active items use REVERSE
+    expect(result).toContain('\x1b[7m');
   });
 
   it('highlights log panel when active', () => {
     const result = renderLegend({ logPanelActive: true });
-    expect(result).toContain('48;5;237m');
+    expect(result).toContain('\x1b[7m');
   });
 });
 
@@ -294,8 +294,8 @@ describe('renderListView', () => {
     const state = createTestState();
     state.cursor = 0;
     const output = renderListView(state);
-    // Cursor row should contain BG_HIGHLIGHT for full-row highlight
-    expect(output).toContain('\x1b[48;5;237m');
+    // Cursor row should contain REVERSE for highlight
+    expect(output).toContain('\x1b[7m');
   });
 
   it('shows CPU/MEM for running services with stats', () => {
@@ -310,7 +310,8 @@ describe('renderListView', () => {
 
   it('shows CPU/MEM with warn color', () => {
     const state = createTestState();
-    const sk = statusKey(state.groups[0].file, 'postgres');
+    // Use redis (non-selected row) so fg colors aren't swapped for REVERSE
+    const sk = statusKey(state.groups[0].file, 'redis');
     state.containerStats.set(sk, { cpuPercent: 75, memUsageBytes: 100 * 1024 * 1024 });
     const output = renderListView(state);
     // Should contain yellow color
@@ -319,7 +320,8 @@ describe('renderListView', () => {
 
   it('shows CPU/MEM with danger color', () => {
     const state = createTestState();
-    const sk = statusKey(state.groups[0].file, 'postgres');
+    // Use redis (non-selected row) so fg colors aren't swapped for REVERSE
+    const sk = statusKey(state.groups[0].file, 'redis');
     state.containerStats.set(sk, { cpuPercent: 150, memUsageBytes: 100 * 1024 * 1024 });
     const output = renderListView(state);
     expect(output).toContain('31m'); // red
@@ -505,19 +507,20 @@ describe('renderListView', () => {
     expect(output).toContain('\x1b[90m2024-01-01 INF]');
   });
 
-  it('shows service name always in white regardless of worktree', () => {
+  it('shows service name always in bold regardless of worktree', () => {
     const state = createTestState();
     const sk = statusKey(state.groups[0].file, 'postgres');
     state.statuses.set(sk, createMockStatus({ worktree: 'fix-bug' }));
     const output = renderListView(state);
-    // Service name should always use white (37m)
-    expect(output).toContain('\x1b[37mpostgres');
+    // Service name should always use bold (1m)
+    expect(output).toContain('\x1b[1mpostgres');
   });
 
   it('shows worktree column in yellow when worktree is not main', () => {
     const state = createTestState();
     state.showWorktreeColumn = true;
-    const sk = statusKey(state.groups[0].file, 'postgres');
+    // Use redis (non-selected row) so fg colors aren't swapped for REVERSE
+    const sk = statusKey(state.groups[0].file, 'redis');
     state.statuses.set(sk, createMockStatus({ worktree: 'fix-bug' }));
     const output = renderListView(state);
     // Worktree column should use yellow (33m) for non-main
@@ -530,8 +533,11 @@ describe('renderListView', () => {
     const sk = statusKey(state.groups[0].file, 'postgres');
     state.statuses.set(sk, createMockStatus({ worktree: 'main' }));
     const output = renderListView(state);
-    // Worktree column on selected row promotes DIM to white (37m)
-    expect(output).toContain('\x1b[37mmain');
+    // Selected row removes DIM, so "main" appears without dim styling
+    const lines = output.split('\n');
+    const pgLine = lines.find(l => strip(l).includes('postgres'));
+    expect(pgLine).toBeDefined();
+    expect(pgLine).toContain('main');
   });
 
   it('highlights entire selected row with background color', () => {
@@ -542,10 +548,10 @@ describe('renderListView', () => {
     // Find the line containing postgres (cursor=0, first service)
     const pgLine = lines.find(l => strip(l).includes('postgres'));
     expect(pgLine).toBeDefined();
-    // Should start with BG_HIGHLIGHT and end with RESET
-    expect(pgLine).toContain('\x1b[48;5;237m');
-    // The background should be re-applied after resets within the row
-    const bgCount = (pgLine!.match(/\x1b\[48;5;237m/g) || []).length;
+    // Should use highlight background (48;5;238m) for selected row
+    expect(pgLine).toContain('\x1b[48;5;238m');
+    // Highlight bg should be re-applied after resets within the row
+    const bgCount = (pgLine!.match(/\x1b\[48;5;238m/g) || []).length;
     expect(bgCount).toBeGreaterThan(1);
   });
 });

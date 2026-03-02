@@ -16,6 +16,7 @@ export function createTestConfig(overrides: Partial<Config> = {}): Config {
     cpuDangerThreshold: 100,
     memWarnThreshold: 512,
     memDangerThreshold: 1024,
+    theme: 'auto',
     ...overrides,
   };
 }

@@ -7,6 +7,7 @@ import type { ChildProcess } from 'child_process';
 import { listServices, getStatuses, rebuildService, restartService, stopService, startService, tailLogs, fetchServiceLogs, getContainerId, tailContainerLogs, fetchContainerLogs, fetchContainerStats, parseStatsLine, isWatchAvailable, watchService, parseDependencyGraph, execInContainer, getGitRoot, listGitWorktrees, validateServiceInComposeFile } from './lib/docker';
 import { MODE, createState, statusKey, buildFlatList, moveCursor, selectedEntry, getEffectiveFile } from './lib/state';
 import { clearScreen, showCursor, renderListView, renderLogView, renderExecView, CLEAR_EOL, CLEAR_EOS } from './lib/renderer';
+import { detectTheme, getPalette, setActivePalette } from './lib/theme';
 import type { Config, AppState, ServiceGroup, Killable, StatsHistory, CascadeStep, CascadeOperation, GitWorktree } from './lib/types';
 
 // --- Module-level mutable state ---
@@ -48,6 +49,7 @@ export function loadConfig(): Config {
     cpuDangerThreshold: 100,
     memWarnThreshold: 512,
     memDangerThreshold: 1024,
+    theme: 'auto',
   };
 
   const configPath = path.join(process.cwd(), 'recomposable.json');
@@ -79,6 +81,9 @@ export function loadConfig(): Config {
         if (typeof raw[key] === 'number' && isFinite(raw[key]) && raw[key] >= min && raw[key] <= max) {
           (defaults as unknown as Record<string, unknown>)[key] = raw[key];
         }
+      }
+      if (raw.theme === 'light' || raw.theme === 'dark' || raw.theme === 'auto') {
+        defaults.theme = raw.theme;
       }
     }
   }
@@ -1935,7 +1940,7 @@ export function _setModuleState(ms: ModuleState): void {
 
 // --- Main ---
 
-function main(): void {
+async function main(): Promise<void> {
   // Enter alternate screen buffer so pre-launch output (e.g. npx install) is hidden
   process.stdout.write('\x1b[?1049h');
   const config = loadConfig();
@@ -1957,6 +1962,10 @@ function main(): void {
   }
   process.stdin.resume();
   process.stdin.setEncoding('utf8');
+
+  const themeMode = await detectTheme(config.theme);
+  setActivePalette(getPalette(themeMode));
+
   process.stdin.on('data', createInputHandler(state));
 
   pollLogCounts(state);
@@ -2001,5 +2010,8 @@ function main(): void {
 
 // Only run main when executed directly (not when imported for testing)
 if (require.main === module) {
-  main();
+  main().catch((err) => {
+    process.stderr.write(`${err}\n`);
+    process.exit(1);
+  });
 }

@@ -23,6 +23,7 @@ export interface Config {
   cpuDangerThreshold: number;
   memWarnThreshold: number;
   memDangerThreshold: number;
+  theme: 'auto' | 'light' | 'dark';
 }
 
 // --- Port / Status ---
