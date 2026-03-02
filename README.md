@@ -1,6 +1,6 @@
 # recomposable
 
-A lightweight Docker Compose TUI manager with vim keybindings. Monitor service status, restart or rebuild containers, and tail logs — all from your terminal.
+A lightweight Docker Compose TUI manager with vim keybindings. Monitor service status, restart and/or rebuild services, switch workspaces for individual services and tail logs — all from your terminal.
 
 Eliminate switching between countless terminal tabs or windows to rebuild you docker compose containers.
 
@@ -74,6 +74,8 @@ Press `d` to rebuild the selected service and then automatically restart all ser
 Press `t` on any service to switch it to a different git worktree. A picker shows all available worktrees — navigate with `j`/`k`, confirm with `Enter`. The service is automatically stopped, rebuilt, and started from the target worktree's compose file. A `WORKTREE` column appears when services run from multiple branches, with non-main branches highlighted in yellow.
 
 This is useful for end-to-end testing changes across branches without drowning in terminal tabs. Run your main stack on `main`, then switch individual services to feature branches to verify their behavior in the full environment. Particularly handy when letting Claude Code work in worktrees — switch the affected service, verify it end-to-end, and switch back, all from a single terminal.
+
+![recomposable worktree gif](screenshots/worktree.gif)
 
 ## Adding Compose Files
 
@@ -195,6 +197,10 @@ recomposable -f docker-compose.yml -f docker-compose.prod.yml
 
 - Node.js >= 16
 - Docker with `docker compose` (v2) CLI
+
+## BLog posts
+- https://dev.to/janvandorth/every-docker-compose-tui-i-could-find-and-why-i-built-my-own-2oo0
+- https://dev.to/janvandorth/testing-microservice-changes-from-git-worktrees-end-to-end-without-the-terminal-tab-explosion-e1f
 
 ## License
 
