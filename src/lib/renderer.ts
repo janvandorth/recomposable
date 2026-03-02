@@ -457,10 +457,11 @@ export function renderListView(state: AppState): string {
 
         let row = `  ${watchIndicator}${icon} ${bold}${name}${reset} ${statusPadded} ${built} ${restarted}${countsStr}  ${cpuMemStr} ${portsStr}${worktreeCol}`;
         if (isSelected) {
-          const { highlightBg } = getActivePalette();
+          const { highlightBg, dim: dimCode } = getActivePalette();
           // Use explicit bg color for highlight bar so colored text stays readable;
           // strip dim/gray so text pops on the highlight bg; make fg colors bold
-          row = row.replace(/\x1b\[2m/g, '').replace(/\x1b\[90m/g, '');
+          const dimEsc = dimCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          row = row.replace(/\x1b\[2m/g, '').replace(/\x1b\[90m/g, '').replace(new RegExp(dimEsc, 'g'), '');
           row = row.replace(/\x1b\[1;3([1-6])m/g, '\x1b[1;3$1m');
           row = row.replace(/\x1b\[3([1-6])m/g, '\x1b[1;3$1m');
           row = `${highlightBg}${bold}${row.replace(/\x1b\[0m/g, `${reset}${highlightBg}${bold}`)}${' '.repeat(Math.max(0, columns - visLen(row)))}${reset}`;

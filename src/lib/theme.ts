@@ -19,7 +19,7 @@ export interface ColorPalette {
 export const DARK_PALETTE: ColorPalette = {
   reset: `${ESC}0m`,
   bold: `${ESC}1m`,
-  dim: `${ESC}2m`,
+  dim: `${ESC}38;5;250m`,
   italic: `${ESC}3m`,
   reverse: `${ESC}7m`,
   green: `${ESC}32m`,
@@ -35,7 +35,7 @@ export const DARK_PALETTE: ColorPalette = {
 export const LIGHT_PALETTE: ColorPalette = {
   reset: `${ESC}0m`,
   bold: `${ESC}1m`,
-  dim: `${ESC}2m`,
+  dim: `${ESC}38;5;242m`,
   italic: `${ESC}3m`,
   reverse: `${ESC}7m`,
   green: `${ESC}32m`,
