@@ -120,6 +120,7 @@ describe('listServices (mocked)', () => {
     vi.resetModules();
     execFileSyncMock = vi.fn();
     vi.doMock('child_process', () => ({
+      execFile: vi.fn(),
       execFileSync: execFileSyncMock,
       spawn: vi.fn(),
     }));
@@ -162,6 +163,7 @@ describe('getStatuses (mocked)', () => {
     vi.resetModules();
     execFileSyncMock = vi.fn();
     vi.doMock('child_process', () => ({
+      execFile: vi.fn(),
       execFileSync: execFileSyncMock,
       spawn: vi.fn(),
     }));
@@ -310,6 +312,7 @@ describe('rebuildService (mocked)', () => {
       kill: vi.fn(),
     });
     vi.doMock('child_process', () => ({
+      execFile: vi.fn(),
       execFileSync: vi.fn(),
       spawn: spawnMock,
     }));
@@ -350,6 +353,7 @@ describe('getContainerId (mocked)', () => {
     vi.resetModules();
     execFileSyncMock = vi.fn();
     vi.doMock('child_process', () => ({
+      execFile: vi.fn(),
       execFileSync: execFileSyncMock,
       spawn: vi.fn(),
     }));
@@ -385,6 +389,7 @@ describe('getGitRoot (mocked)', () => {
     vi.resetModules();
     execFileSyncMock = vi.fn();
     vi.doMock('child_process', () => ({
+      execFile: vi.fn(),
       execFileSync: execFileSyncMock,
       spawn: vi.fn(),
     }));
@@ -420,6 +425,7 @@ describe('listGitWorktrees (mocked)', () => {
     vi.resetModules();
     execFileSyncMock = vi.fn();
     vi.doMock('child_process', () => ({
+      execFile: vi.fn(),
       execFileSync: execFileSyncMock,
       spawn: vi.fn(),
     }));
@@ -506,6 +512,7 @@ describe('validateServiceInComposeFile (mocked)', () => {
     vi.resetModules();
     execFileSyncMock = vi.fn();
     vi.doMock('child_process', () => ({
+      execFile: vi.fn(),
       execFileSync: execFileSyncMock,
       spawn: vi.fn(),
     }));

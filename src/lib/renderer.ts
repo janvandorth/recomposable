@@ -1,6 +1,6 @@
-import { statusKey, MODE, worktreeLabel } from './state';
-import { getActivePalette } from './theme';
-import type { AppState, LegendOptions, DisplayLine } from './types';
+import { statusKey, MODE, worktreeLabel } from './state.js';
+import { getActivePalette } from './theme.js';
+import type { AppState, LegendOptions, DisplayLine } from './types.js';
 
 const ESC = '\x1b[';
 
@@ -162,7 +162,7 @@ export function renderLegend(opts: LegendOptions = {}): string {
       item('[Enter] run', false),
       item('[Up/Down] history', false),
       item('[Ctrl+C] kill', false),
-      item('[Q]uit', false),
+      item('[Ctrl+Q] quit', false),
     ].join('  ');
   }
   if (execInline) {
@@ -171,8 +171,8 @@ export function renderLegend(opts: LegendOptions = {}): string {
       item('[Enter] run', false),
       item('[Up/Down] history', false),
       item('[Ctrl+C] kill', false),
-      item('[x] full screen', false),
-      item('[Q]uit', false),
+      item('[Ctrl+F] full screen', false),
+      item('[Ctrl+Q] quit', false),
     ].join('  ');
   }
   if (logsScrollMode) {
@@ -187,20 +187,37 @@ export function renderLegend(opts: LegendOptions = {}): string {
       item('[Q]uit', false),
     ].join('  ');
   }
-  return [
-    item('Re[B]uild', false),
+  if (opts.multiSelectActive) {
+    return [
+      item('[v] toggle', false),
+      item('[Esc] discard', false),
+      item('Re[B]uild all', false),
+      item('[S]tart all', false),
+      item('Sto[P] all', false),
+      item('Switch [t]ree all', false),
+      item('[Q]uit', false),
+    ].join('  ');
+  }
+  const { buildingActive = false, startingActive = false } = opts;
+  const items = [
+    item(buildingActive ? 'Stop [B]uild' : 'Re[B]uild', buildingActive),
     item('[D]ep rebuild', false),
-    item('[S]tart/restart', false),
+    item(startingActive ? 'Stop [S]tart' : 'Re[S]tart', startingActive),
     item('Sto[P]', false),
     item('[W]atch', watchActive),
     item('[N]o cache', noCacheActive),
     item('n[O] deps', noDepsActive),
     item('[e]xec', false),
-    item('[F]ull logs', false),
-    item('[L]og panel', logPanelActive),
+    item('[F]ull [L]ogs', logPanelActive),
+    item('[v] select', false),
     item('Switch [t]ree', false),
     item('[Q]uit', false),
-  ].join('  ');
+  ];
+  const customActions = opts.customActions || [];
+  for (const action of customActions) {
+    items.push(item(`[${action.key}] ${action.label}`, false));
+  }
+  return items.join('  ');
 }
 
 export function renderListView(state: AppState): string {
@@ -216,11 +233,18 @@ export function renderListView(state: AppState): string {
     buf.push(line);
   }
   const watchActive = state.watching.size > 0;
+  const selEntry = state.flatList[state.cursor];
+  const selSk = selEntry ? statusKey(selEntry.file, selEntry.service) : '';
+  const buildingActive = !!selSk && (state.rebuilding.has(selSk) || state.cascading.has(selSk));
+  const startingActive = !!selSk && (state.starting.has(selSk) || state.restarting.has(selSk));
+  const isMulti = state.multiSelected.size > 0;
   const help = state.execActive
     ? renderLegend({ execInline: true })
     : state.worktreePickerActive
     ? renderLegend({ worktreePickerActive: true })
-    : renderLegend({ logPanelActive: state.showBottomLogs, noCacheActive: state.noCache, noDepsActive: state.noDeps, watchActive });
+    : isMulti
+    ? renderLegend({ multiSelectActive: true })
+    : renderLegend({ logPanelActive: state.showBottomLogs, noCacheActive: state.noCache, noDepsActive: state.noDeps, watchActive, buildingActive, startingActive, customActions: state.config.customActions });
   buf.push(sep);
   buf.push(` ${help}`);
 
@@ -235,7 +259,31 @@ export function renderListView(state: AppState): string {
   const headerHeight = buf.length;
 
   const bottomBuf: string[] = [];
-  if (state.worktreePickerActive) {
+  if (isMulti) {
+    bottomBuf.push(sep);
+    bottomBuf.push(` ${cyan}Selection${reset} ${dim}- press Esc to discard${reset}`);
+    for (const mSk of state.multiSelected) {
+      const mEntry = state.flatList.find(e => statusKey(e.file, e.service) === mSk);
+      if (mEntry) {
+        bottomBuf.push(`  ${cyan}\u2713${reset} ${bold}${mEntry.service}${reset}`);
+      }
+    }
+    // If worktree picker is also active during multiselect, show both
+    if (state.worktreePickerActive) {
+      bottomBuf.push(sep);
+      bottomBuf.push(` ${cyan}switch worktree ${bold}selected services${reset}`);
+      bottomBuf.push(`  ${dim}j/k navigate  Enter confirm  Esc cancel${reset}`);
+      for (let wi = 0; wi < state.worktreePickerEntries.length; wi++) {
+        const wt = state.worktreePickerEntries[wi];
+        const isSelected = wi === state.worktreePickerCursor;
+        const prefix = isSelected ? `${reverse}` : '';
+        const suffix = isSelected ? `${reset}` : '';
+        const currentTag = (state.worktreePickerCurrentPath && state.worktreePickerCurrentPath === wt.path)
+          ? ` ${dim}(current)${reset}` : '';
+        bottomBuf.push(`  ${prefix}  ${wt.branch}  ${dim}${wt.path}${reset}${currentTag}${suffix}`);
+      }
+    }
+  } else if (state.worktreePickerActive) {
     const selEntry = state.flatList[state.cursor];
     if (selEntry) {
       bottomBuf.push(sep);
@@ -294,7 +342,13 @@ export function renderListView(state: AppState): string {
         const actionColor = isFailed ? red
           : info.action === 'rebuilding' || info.action === 'restarting' || info.action === 'stopping' || info.action === 'starting' || info.action === 'cascading' || info.action === 'switching' ? yellow
           : info.action === 'watching' ? cyan : green;
-        const actionLabel = isFailed ? info.action.replace('_', ' ').toUpperCase() : info.action;
+        let actionLabel: string;
+        if (isFailed) actionLabel = info.action.replace('_', ' ').toUpperCase();
+        else if (info.action === 'rebuilding') actionLabel = 'Build logs';
+        else if (info.action === 'restarting') actionLabel = 'Restarting';
+        else if (info.action === 'switching') actionLabel = 'Switching';
+        else if (info.action === 'logs' || info.action === 'started') actionLabel = 'Run logs';
+        else actionLabel = info.action;
         let headerLine = ` ${actionColor}${actionLabel} ${bold}${info.service}${reset}`;
         const bq = state.bottomSearchQuery || '';
         if (bq && !state.bottomSearchActive) {
@@ -319,7 +373,7 @@ export function renderListView(state: AppState): string {
 
         for (const line of visibleLines) {
           let coloredLine = line.substring(0, columns - 4);
-          const lineColor = logLineColor(coloredLine, patterns) || gray;
+          const lineColor = logLineColor(coloredLine, patterns) || dim;
           if (searchQuery) {
             const lowerLine = coloredLine.toLowerCase();
             const lowerQ = searchQuery.toLowerCase();
@@ -455,7 +509,8 @@ export function renderListView(state: AppState): string {
           worktreeCol = ` ${wtColor}${wtLabel.padEnd(15)}${reset}`;
         }
 
-        let row = `  ${watchIndicator}${icon} ${bold}${name}${reset} ${statusPadded} ${built} ${restarted}${countsStr}  ${cpuMemStr} ${portsStr}${worktreeCol}`;
+        const multiMark = state.multiSelected.has(sk) ? `${cyan} \u2713${reset}` : '  ';
+        let row = `${multiMark}${watchIndicator}${icon} ${bold}${name}${reset} ${statusPadded} ${built} ${restarted}${countsStr}  ${cpuMemStr} ${portsStr}${worktreeCol}`;
         if (isSelected) {
           const { highlightBg, dim: dimCode } = getActivePalette();
           // Use explicit bg color for highlight bar so colored text stays readable;
@@ -557,12 +612,12 @@ export function renderLogView(state: AppState): string {
     if (buildInfo && buildInfo.action === 'build_failed') {
       statusLine = ` ${red}build failed ${bold}${serviceName}${reset}`;
     } else if (isBuilding) {
-      statusLine = ` ${yellow}rebuilding ${bold}${serviceName}${reset}`;
+      statusLine = ` ${yellow}Build logs ${bold}${serviceName}${reset}`;
     } else {
-      statusLine = ` ${green}build logs ${bold}${serviceName}${reset}`;
+      statusLine = ` ${yellow}Build logs ${bold}${serviceName}${reset}`;
     }
   } else {
-    statusLine = ` ${green}full logs ${bold}${serviceName}${reset}`;
+    statusLine = ` ${green}Run logs ${bold}${serviceName}${reset}`;
   }
   let scrollStatus: string;
   if (state.logAutoScroll) {

@@ -4,5 +4,12 @@
   ],
   "pollInterval": 3000,
   "logTailLines": 100,
-  "logScanPatterns": [["WRN]", "WARNING"], ["ERR]", "ERROR"]]
+  "logScanPatterns": [["WRN]", "WARNING"], ["ERR]", "ERROR"]],
+  "customActions": [
+    {
+      "key": "1",
+      "label": "iTerm tab",
+      "command": "osascript -e 'tell application \"iTerm2\" to tell current window to create tab with default profile' -e 'tell application \"iTerm2\" to tell current session of current window to write text \"cd {worktreePath}\"'"
+    }
+  ]
 }

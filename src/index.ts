@@ -1,14 +1,20 @@
 #!/usr/bin/env node
-'use strict';
 
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import type { ChildProcess } from 'child_process';
-import { listServices, getStatuses, rebuildService, restartService, stopService, startService, tailLogs, fetchServiceLogs, getContainerId, tailContainerLogs, fetchContainerLogs, fetchContainerStats, parseStatsLine, isWatchAvailable, watchService, parseDependencyGraph, execInContainer, getGitRoot, listGitWorktrees, validateServiceInComposeFile } from './lib/docker';
-import { MODE, createState, statusKey, buildFlatList, moveCursor, selectedEntry, getEffectiveFile } from './lib/state';
-import { clearScreen, showCursor, renderListView, renderLogView, renderExecView, CLEAR_EOL, CLEAR_EOS } from './lib/renderer';
-import { detectTheme, getPalette, setActivePalette } from './lib/theme';
-import type { Config, AppState, ServiceGroup, Killable, StatsHistory, CascadeStep, CascadeOperation, GitWorktree } from './lib/types';
+import { exec } from 'child_process';
+import { listServices, getStatuses, getStatusesAsync, rebuildService, restartService, stopService, startService, tailLogs, fetchServiceLogs, getContainerId, getContainerIdAsync, tailContainerLogs, fetchContainerLogs, fetchContainerStats, parseStatsLine, isWatchAvailable, watchService, parseDependencyGraph, execInContainer, getGitRoot, listGitWorktrees, validateServiceInComposeFile } from './lib/docker.js';
+import { MODE, createState, statusKey, buildFlatList, moveCursor, selectedEntry, getEffectiveFile, getComposeTarget, composeProjectName } from './lib/state.js';
+import { clearScreen, showCursor, renderListView, renderLogView, renderExecView, CLEAR_EOL, CLEAR_EOS } from './lib/renderer.js';
+import { detectTheme, getPalette, setActivePalette } from './lib/theme.js';
+import type { Config, AppState, ServiceGroup, Killable, StatsHistory, CascadeStep, CascadeOperation, GitWorktree, CustomAction } from './lib/types.js';
+
+// Ink imports (lazy-loaded in main to avoid startup cost in tests)
+let inkRenderFn: typeof import('ink').render | null = null;
+let React: typeof import('react') | null = null;
+let AppComponent: typeof import('./components/App.js').App | null = null;
 
 // --- Module-level mutable state ---
 
@@ -32,6 +38,62 @@ export function createModuleState(): ModuleState {
 
 let moduleState = createModuleState();
 
+// --- Reserved keys (built-in LIST mode bindings) ---
+
+export const RESERVED_KEYS = new Set([
+  'j', 'k', 'b', 'd', 'w', 'e', 'x', 's', 'p', 'n', 'o', 'v',
+  'f', 'l', 't', 'q', 'G', 'g', '/',
+  '\r', '\x1b', '\x1b[A', '\x1b[B',
+]);
+
+// --- Variable substitution for custom actions ---
+
+export function substituteVariables(template: string, vars: Record<string, string>): string {
+  return template.replace(/\{(\w+)\}/g, (match, name) => {
+    return name in vars ? vars[name] : match;
+  });
+}
+
+// --- Execute custom action ---
+
+export function executeCustomAction(state: AppState, key: string): boolean {
+  const action = state.config.customActions.find(a => a.key === key);
+  if (!action) return false;
+
+  const entry = selectedEntry(state);
+  if (!entry) return false;
+
+  const sk = statusKey(entry.file, entry.service);
+  const st = state.statuses.get(sk);
+
+  // Resolve worktree filesystem path from branch name
+  let worktreePath = '';
+  if (st?.worktree) {
+    const gitRoot = getGitRoot(path.dirname(entry.file));
+    if (gitRoot) {
+      const wts = listGitWorktrees(gitRoot);
+      const match = wts.find(wt => wt.branch === st.worktree);
+      if (match) worktreePath = match.path;
+    }
+  }
+
+  const vars: Record<string, string> = {
+    service: entry.service,
+    file: entry.file,
+    workingDir: st?.workingDir || '',
+    worktree: st?.worktree || '',
+    worktreePath,
+    containerId: st?.id || '',
+    cwd: process.cwd(),
+  };
+
+  const cmd = substituteVariables(action.command, vars);
+  const child = exec(cmd, { stdio: 'ignore' } as any);
+  child.unref();
+
+  return true;
+}
+
 // --- Config ---
 
 export function loadConfig(): Config {
@@ -50,6 +112,7 @@ export function loadConfig(): Config {
     memWarnThreshold: 512,
     memDangerThreshold: 1024,
     theme: 'auto',
+    customActions: [],
   };
 
   const configPath = path.join(process.cwd(), 'recomposable.json');
@@ -84,6 +147,39 @@ export function loadConfig(): Config {
       }
       if (raw.theme === 'light' || raw.theme === 'dark' || raw.theme === 'auto') {
         defaults.theme = raw.theme;
+      }
+      // Parse customActions
+      if (Array.isArray(raw.customActions)) {
+        const seen = new Set<string>();
+        for (const entry of raw.customActions) {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            process.stderr.write(`customActions: skipping invalid entry (not an object)\n`);
+            continue;
+          }
+          const { key, label, command } = entry;
+          if (typeof key !== 'string' || key.length !== 1) {
+            process.stderr.write(`customActions: skipping entry with invalid key "${key}" (must be a single character)\n`);
+            continue;
+          }
+          if (typeof label !== 'string' || !label) {
+            process.stderr.write(`customActions: skipping entry "${key}" with empty label\n`);
+            continue;
+          }
+          if (typeof command !== 'string' || !command) {
+            process.stderr.write(`customActions: skipping entry "${key}" with empty command\n`);
+            continue;
+          }
+          if (RESERVED_KEYS.has(key)) {
+            process.stderr.write(`customActions: skipping entry "${key}" — conflicts with built-in key\n`);
+            continue;
+          }
+          if (seen.has(key)) {
+            process.stderr.write(`customActions: skipping duplicate key "${key}"\n`);
+            continue;
+          }
+          seen.add(key);
+          defaults.customActions.push({ key, label, command });
+        }
       }
     }
   }
@@ -130,29 +226,38 @@ export function discoverServices(config: Config): ServiceGroup[] {
 // --- Status Polling ---
 
 export function pollStatuses(state: AppState): void {
+  pollStatusesAsync(state).catch(() => {});
+}
+
+async function pollStatusesAsync(state: AppState): Promise<void> {
   // Collect services by their effective file (may differ from group file due to worktree overrides)
-  const fileToServices = new Map<string, Array<{ sk: string; service: string }>>();
+  const fileToServices = new Map<string, Array<{ sk: string; service: string; projectName?: string }>>();
   for (const group of state.groups) {
     if (group.error) continue;
     for (const service of group.services) {
       const sk = statusKey(group.file, service);
-      const file = getEffectiveFile(state, group.file, service);
+      const { file, projectName } = getComposeTarget(state, group.file, service);
       if (!fileToServices.has(file)) fileToServices.set(file, []);
-      fileToServices.get(file)!.push({ sk, service });
+      fileToServices.get(file)!.push({ sk, service, projectName });
     }
   }
-  for (const [file, services] of fileToServices) {
-    const statuses = getStatuses(file);
+  const results = await Promise.all(
+    [...fileToServices.entries()].map(async ([file, services]) => {
+      const statuses = await getStatusesAsync(file, services[0].projectName);
+      return { services, statuses };
+    })
+  );
+  for (const { services, statuses } of results) {
     const serviceSet = new Set(services.map(s => s.service));
     for (const [svc, st] of statuses) {
       if (serviceSet.has(svc)) {
-        // Store under the original statusKey (group.file based)
         const match = services.find(s => s.service === svc);
         if (match) state.statuses.set(match.sk, st);
       }
     }
   }
   detectMultipleWorktrees(state);
+  if (state.mode === MODE.LIST) render(state);
 }
 
 export function detectMultipleWorktrees(state: AppState): void {
@@ -297,6 +402,12 @@ export function pollContainerStats(state: AppState): void {
 // --- Rendering ---
 
 export function render(state: AppState): void {
+  // If Ink is active, trigger a React re-render
+  if ((state as any)._inkRender) {
+    (state as any)._inkRender();
+    return;
+  }
+  // Fallback: ANSI string rendering (used in tests and pre-Ink mode)
   let view = '';
   if (state.mode === MODE.LIST) {
     view = renderListView(state);
@@ -337,6 +448,31 @@ export function throttledRender(state: AppState): void {
 
 // --- Actions ---
 
+function ensureAnimTimer(state: AppState): void {
+  if (state.animTimer) return;
+  state.animDots = 0;
+  state.animTimer = setInterval(() => {
+    state.animDots = (state.animDots + 1) % 3;
+    // Only re-render if there's something animating
+    const hasActivity = state.bottomLogLoading
+      || state.rebuilding.size > 0
+      || state.restarting.size > 0
+      || state.stopping.size > 0
+      || state.starting.size > 0
+      || state.cascading.size > 0;
+    if (hasActivity && state.mode === MODE.LIST) render(state);
+  }, 500);
+}
+
+function startBottomLogLoadingAnim(state: AppState): void {
+  state.bottomLogLoading = true;
+  ensureAnimTimer(state);
+}
+
+function stopBottomLogLoadingAnim(state: AppState): void {
+  state.bottomLogLoading = false;
+}
+
 export function updateSelectedLogs(state: AppState): void {
   const entry = selectedEntry(state);
   if (!entry) return;
@@ -345,49 +481,62 @@ export function updateSelectedLogs(state: AppState): void {
 
   if (state.selectedLogKey === sk) return;
 
-  state.bottomSearchQuery = '';
-  state.bottomSearchActive = false;
-  clearBottomSearch(state);
-
+  // Cancel any pending log fetch
   if (moduleState.logFetchTimer) {
     clearTimeout(moduleState.logFetchTimer);
     moduleState.logFetchTimer = null;
   }
 
+  // Immediately kill old tail so it stops pumping data during scrolling
   if (state.selectedLogKey) {
-    const oldInfo = state.bottomLogLines.get(state.selectedLogKey);
+    const oldKey = state.selectedLogKey;
+    const oldInfo = state.bottomLogLines.get(oldKey);
     if (oldInfo && (oldInfo.action === 'logs' || oldInfo.action === 'started')) {
-      if (!state.rebuilding.has(state.selectedLogKey) && !state.restarting.has(state.selectedLogKey)) {
-        state.bottomLogLines.delete(state.selectedLogKey);
-        if (state.bottomLogTails.has(state.selectedLogKey)) {
-          state.bottomLogTails.get(state.selectedLogKey)!.kill('SIGTERM');
-          state.bottomLogTails.delete(state.selectedLogKey);
+      if (!state.rebuilding.has(oldKey) && !state.restarting.has(oldKey)) {
+        if (state.bottomLogTails.has(oldKey)) {
+          state.bottomLogTails.get(oldKey)!.kill('SIGTERM');
+          state.bottomLogTails.delete(oldKey);
         }
+        state.bottomLogLines.delete(oldKey);
       }
     }
   }
 
   state.selectedLogKey = sk;
+  state.bottomSearchQuery = '';
+  state.bottomSearchActive = false;
+  clearBottomSearch(state);
 
-  if (state.bottomLogLines.has(sk)) return;
+  // If we already have cached log data for this service, show it immediately
+  if (state.bottomLogLines.has(sk)) {
+    stopBottomLogLoadingAnim(state);
+    return;
+  }
 
-  state.bottomLogLines.set(sk, { action: 'logs', service: entry.service, lines: [] });
+  // Start animated "loading logs." indicator immediately
+  startBottomLogLoadingAnim(state);
 
-  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+  // Debounce: only start loading logs after the user stops scrolling
+  const { file: effectiveFile, projectName } = getComposeTarget(state, entry.file, entry.service);
   moduleState.logFetchTimer = setTimeout(() => {
     moduleState.logFetchTimer = null;
-    startBottomLogTail(state, sk, effectiveFile, entry.service);
-  }, 500);
+    // Bail if user scrolled away during the debounce
+    if (state.selectedLogKey !== sk) return;
+    state.bottomLogLines.set(sk, { action: 'logs', service: entry.service, lines: [] });
+    startBottomLogTail(state, sk, effectiveFile, entry.service, projectName);
+    if (state.mode === MODE.LIST) render(state);
+  }, 1200);
 }
 
-function startBottomLogTail(state: AppState, sk: string, file: string, service: string): void {
+async function startBottomLogTail(state: AppState, sk: string, file: string, service: string, projectName?: string): Promise<void> {
   if (state.bottomLogTails.has(sk)) {
     state.bottomLogTails.get(sk)!.kill('SIGTERM');
     state.bottomLogTails.delete(sk);
   }
 
-  const containerId = getContainerId(file, service);
-  if (!containerId) return;
+  const containerId = await getContainerIdAsync(file, service, projectName);
+  // If the user scrolled away while we were waiting, bail out
+  if (!containerId || state.selectedLogKey !== sk) return;
 
   const maxLines = state.config.bottomLogCount || 10;
   const logChild = tailContainerLogs(containerId, maxLines);
@@ -404,6 +553,7 @@ function startBottomLogTail(state: AppState, sk: string, file: string, service: 
     if (newLines.length === 0) return;
     info.lines.push(...newLines);
     if (info.lines.length > maxLines) info.lines = info.lines.slice(-maxLines);
+    if (state.bottomLogLoading) stopBottomLogLoadingAnim(state);
     if (state.mode === MODE.LIST) throttledRender(state);
   };
 
@@ -414,18 +564,21 @@ function startBottomLogTail(state: AppState, sk: string, file: string, service: 
 export function doRebuild(state: AppState): void {
   const entry = selectedEntry(state);
   if (!entry) return;
+  doRebuildEntry(state, entry);
+}
 
+export function doRebuildEntry(state: AppState, entry: { file: string; service: string; groupIdx: number }): void {
   const sk = statusKey(entry.file, entry.service);
   if (state.rebuilding.has(sk)) return;
 
-  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+  const { file: effectiveFile, projectName } = getComposeTarget(state, entry.file, entry.service);
 
   if (state.bottomLogTails.has(sk)) {
     state.bottomLogTails.get(sk)!.kill('SIGTERM');
     state.bottomLogTails.delete(sk);
   }
 
-  const child = rebuildService(effectiveFile, entry.service, { noCache: state.noCache, noDeps: state.noDeps });
+  const child = rebuildService(effectiveFile, entry.service, { noCache: state.noCache, noDeps: state.noDeps }, projectName);
   state.rebuilding.set(sk, child as Killable);
 
   state.bottomLogLines.set(sk, { action: 'rebuilding', service: entry.service, lines: [] });
@@ -469,7 +622,7 @@ export function doRebuild(state: AppState): void {
       if (state.logBuildKey !== sk) info.lines = [];
     }
 
-    startBottomLogTail(state, sk, effectiveFile, entry.service);
+    startBottomLogTail(state, sk, effectiveFile, entry.service, projectName);
     if (state.mode === MODE.LIST) render(state);
   });
 }
@@ -477,18 +630,21 @@ export function doRebuild(state: AppState): void {
 export function doRestart(state: AppState): void {
   const entry = selectedEntry(state);
   if (!entry) return;
+  doRestartEntry(state, entry);
+}
 
+export function doRestartEntry(state: AppState, entry: { file: string; service: string; groupIdx: number }): void {
   const sk = statusKey(entry.file, entry.service);
   if (state.restarting.has(sk) || state.rebuilding.has(sk)) return;
 
-  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+  const { file: effectiveFile, projectName } = getComposeTarget(state, entry.file, entry.service);
 
   if (state.bottomLogTails.has(sk)) {
     state.bottomLogTails.get(sk)!.kill('SIGTERM');
     state.bottomLogTails.delete(sk);
   }
 
-  const child = restartService(effectiveFile, entry.service);
+  const child = restartService(effectiveFile, entry.service, projectName);
   state.restarting.set(sk, child as Killable);
 
   state.bottomLogLines.set(sk, { action: 'restarting', service: entry.service, lines: [] });
@@ -512,7 +668,7 @@ export function doRestart(state: AppState): void {
       info.lines = [];
     }
 
-    startBottomLogTail(state, sk, effectiveFile, entry.service);
+    startBottomLogTail(state, sk, effectiveFile, entry.service, projectName);
     if (state.mode === MODE.LIST) render(state);
   });
 }
@@ -520,7 +676,10 @@ export function doRestart(state: AppState): void {
 export function doStop(state: AppState): void {
   const entry = selectedEntry(state);
   if (!entry) return;
+  doStopEntry(state, entry);
+}
 
+export function doStopEntry(state: AppState, entry: { file: string; service: string; groupIdx: number }): void {
   const sk = statusKey(entry.file, entry.service);
   if (state.stopping.has(sk) || state.rebuilding.has(sk) || state.restarting.has(sk)) return;
 
@@ -532,8 +691,8 @@ export function doStop(state: AppState): void {
     state.bottomLogTails.delete(sk);
   }
 
-  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
-  const child = stopService(effectiveFile, entry.service);
+  const { file: effectiveFile, projectName } = getComposeTarget(state, entry.file, entry.service);
+  const child = stopService(effectiveFile, entry.service, projectName);
   state.stopping.set(sk, child as Killable);
   state.bottomLogLines.set(sk, { action: 'stopping', service: entry.service, lines: [] });
   render(state);
@@ -554,15 +713,18 @@ export function doStop(state: AppState): void {
 export function doStart(state: AppState): void {
   const entry = selectedEntry(state);
   if (!entry) return;
+  doStartEntry(state, entry);
+}
 
+export function doStartEntry(state: AppState, entry: { file: string; service: string; groupIdx: number }): void {
   const sk = statusKey(entry.file, entry.service);
   if (state.starting.has(sk) || state.rebuilding.has(sk) || state.restarting.has(sk) || state.stopping.has(sk)) return;
 
   const st = state.statuses.get(sk);
   if (st && st.state === 'running') return;
 
-  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
-  const child = startService(effectiveFile, entry.service);
+  const { file: effectiveFile, projectName } = getComposeTarget(state, entry.file, entry.service);
+  const child = startService(effectiveFile, entry.service, projectName);
   state.starting.set(sk, child as Killable);
   state.bottomLogLines.set(sk, { action: 'starting', service: entry.service, lines: [] });
   render(state);
@@ -583,7 +745,7 @@ export function doStart(state: AppState): void {
       info.lines = [];
     }
 
-    startBottomLogTail(state, sk, effectiveFile, entry.service);
+    startBottomLogTail(state, sk, effectiveFile, entry.service, projectName);
     if (state.mode === MODE.LIST) render(state);
   });
 }
@@ -623,14 +785,18 @@ export function openWorktreePicker(state: AppState): void {
     return;
   }
 
-  const gitRoot = getGitRoot(composeDir);
+  // Determine current worktree from container status, not original file location
+  const st = state.statuses.get(sk);
+  const containerBranch = st?.worktree || null;
+  const currentWorktree = containerBranch ? worktrees.find(w => w.branch === containerBranch) : null;
+  const currentPath = currentWorktree?.path || getGitRoot(composeDir);
 
   state.worktreePickerEntries = worktrees;
   state.worktreePickerActive = true;
-  state.worktreePickerCurrentPath = gitRoot;
+  state.worktreePickerCurrentPath = currentPath;
 
   // Pre-select first non-current worktree
-  const currentIdx = gitRoot ? worktrees.findIndex(w => w.path === gitRoot) : -1;
+  const currentIdx = currentPath ? worktrees.findIndex(w => w.path === currentPath) : -1;
   const firstOther = worktrees.findIndex((_, i) => i !== currentIdx);
   state.worktreePickerCursor = firstOther >= 0 ? firstOther : 0;
 
@@ -661,9 +827,13 @@ export function doWorktreeSwitch(state: AppState, targetWorktree: GitWorktree): 
     return;
   }
 
-  // If target is the same as current effective file, nothing to do
+  // If target is the same as current effective file AND container is on the target branch, nothing to do
   const currentEffective = getEffectiveFile(state, entry.file, service);
-  if (newFile === currentEffective) {
+  const currentSt = state.statuses.get(sk);
+  const containerBranch = currentSt?.worktree || null;
+  const alreadyOnTarget = path.resolve(newFile) === path.resolve(currentEffective)
+    && (!containerBranch || containerBranch === targetWorktree.branch);
+  if (alreadyOnTarget) {
     render(state);
     return;
   }
@@ -682,6 +852,13 @@ export function doWorktreeSwitch(state: AppState, targetWorktree: GitWorktree): 
   state.bottomLogLines.set(sk, { action: 'switching', service, lines: [`switching to worktree "${targetWorktree.branch}"...`] });
   render(state);
 
+  // Project name always derived from original file for consistency
+  const origProjectName = composeProjectName(entry.file);
+  // Current effective file might also be a worktree override — use original project name
+  const currentProjectName = currentEffective !== entry.file ? origProjectName : undefined;
+  // New file is from the target worktree — use original project name (unless switching back to original)
+  const newProjectName = newFile !== entry.file ? origProjectName : undefined;
+
   const performSwitch = (): void => {
     // Store the worktree override (or remove if switching back to original)
     if (newFile === entry.file) {
@@ -694,7 +871,7 @@ export function doWorktreeSwitch(state: AppState, targetWorktree: GitWorktree): 
     state.bottomLogLines.set(sk, { action: 'switching', service, lines: [`rebuilding in worktree "${targetWorktree.branch}"...`] });
 
     // Rebuild in new worktree
-    const child = rebuildService(newFile, service, { noCache: state.noCache, noDeps: state.noDeps });
+    const child = rebuildService(newFile, service, { noCache: state.noCache, noDeps: state.noDeps }, newProjectName);
     state.rebuilding.set(sk, child as Killable);
 
     let lineBuf = '';
@@ -732,7 +909,7 @@ export function doWorktreeSwitch(state: AppState, targetWorktree: GitWorktree): 
         info.lines = [];
       }
 
-      startBottomLogTail(state, sk, newFile, service);
+      startBottomLogTail(state, sk, newFile, service, newProjectName);
       if (state.mode === MODE.LIST) render(state);
     });
   };
@@ -744,9 +921,147 @@ export function doWorktreeSwitch(state: AppState, targetWorktree: GitWorktree): 
       state.bottomLogTails.get(sk)!.kill('SIGTERM');
       state.bottomLogTails.delete(sk);
     }
-    const stopChild = stopService(currentEffective, service);
+    const stopChild = stopService(currentEffective, service, currentProjectName);
     state.stopping.set(sk, stopChild as Killable);
     render(state);
+
+    stopChild.on('close', () => {
+      state.stopping.delete(sk);
+      performSwitch();
+    });
+  } else {
+    performSwitch();
+  }
+}
+
+export function openWorktreePickerMulti(state: AppState): void {
+  // Use the first selected service to determine worktrees
+  const firstSk = [...state.multiSelected][0];
+  const firstEntry = state.flatList.find(e => statusKey(e.file, e.service) === firstSk);
+  if (!firstEntry) return;
+
+  const composeDir = path.dirname(path.resolve(firstEntry.file));
+  const worktrees = listGitWorktrees(composeDir);
+
+  if (worktrees.length <= 1) {
+    return;
+  }
+
+  // Determine current worktree from container status, not original file location
+  const firstSt = state.statuses.get(firstSk);
+  const containerBranch = firstSt?.worktree || null;
+  const currentWorktree = containerBranch ? worktrees.find(w => w.branch === containerBranch) : null;
+  const currentPath = currentWorktree?.path || getGitRoot(composeDir);
+
+  state.worktreePickerEntries = worktrees;
+  state.worktreePickerActive = true;
+  state.worktreePickerCurrentPath = currentPath;
+
+  const currentIdx = currentPath ? worktrees.findIndex(w => w.path === currentPath) : -1;
+  const firstOther = worktrees.findIndex((_, i) => i !== currentIdx);
+  state.worktreePickerCursor = firstOther >= 0 ? firstOther : 0;
+
+  state.showBottomLogs = true;
+  render(state);
+}
+
+export function doWorktreeSwitchMulti(state: AppState, targetWorktree: GitWorktree): void {
+  // Close picker
+  state.worktreePickerActive = false;
+  state.worktreePickerEntries = [];
+  state.worktreePickerCursor = 0;
+
+  for (const mSk of state.multiSelected) {
+    const entry = state.flatList.find(e => statusKey(e.file, e.service) === mSk);
+    if (!entry) continue;
+    if (state.rebuilding.has(mSk) || state.restarting.has(mSk) || state.stopping.has(mSk) || state.starting.has(mSk) || state.cascading.has(mSk)) continue;
+    doWorktreeSwitchEntry(state, entry, targetWorktree);
+  }
+  render(state);
+}
+
+function doWorktreeSwitchEntry(state: AppState, entry: { file: string; service: string; groupIdx: number }, targetWorktree: GitWorktree): void {
+  const service = entry.service;
+  const sk = statusKey(entry.file, service);
+
+  const newFile = mapComposeFileToWorktree(entry.file, targetWorktree.path);
+  if (!newFile) return;
+
+  const currentEffective = getEffectiveFile(state, entry.file, service);
+  // Also check the container's actual worktree — overrides are lost on restart
+  const currentSt = state.statuses.get(sk);
+  const containerBranch = currentSt?.worktree || null;
+  const alreadyOnTarget = path.resolve(newFile) === path.resolve(currentEffective)
+    && (!containerBranch || containerBranch === targetWorktree.branch);
+  if (alreadyOnTarget) return;
+
+  if (!validateServiceInComposeFile(newFile, service)) return;
+
+  state.bottomLogLines.set(sk, { action: 'switching', service, lines: [`switching to worktree "${targetWorktree.branch}"...`] });
+
+  const origProjectName = composeProjectName(entry.file);
+  const currentProjectName = currentEffective !== entry.file ? origProjectName : undefined;
+  const newProjectName = newFile !== entry.file ? origProjectName : undefined;
+
+  const performSwitch = (): void => {
+    if (newFile === entry.file) {
+      state.worktreeOverrides.delete(sk);
+    } else {
+      state.worktreeOverrides.set(sk, newFile);
+    }
+
+    state.bottomLogLines.set(sk, { action: 'switching', service, lines: [`rebuilding in worktree "${targetWorktree.branch}"...`] });
+
+    const child = rebuildService(newFile, service, { noCache: state.noCache, noDeps: state.noDeps }, newProjectName);
+    state.rebuilding.set(sk, child as Killable);
+
+    let lineBuf = '';
+    const onData = (data: Buffer): void => {
+      const info = state.bottomLogLines.get(sk);
+      if (!info) return;
+      lineBuf += data.toString();
+      const parts = lineBuf.split(/\r?\n|\r/);
+      lineBuf = parts.pop()!;
+      const newLines = parts.filter(l => l.trim().length > 0).map(stripAnsi).filter(Boolean);
+      if (newLines.length === 0) return;
+      info.lines.push(...newLines);
+      if (state.mode === MODE.LIST) throttledRender(state);
+    };
+
+    child.stdout!.on('data', onData);
+    child.stderr!.on('data', onData);
+
+    child.on('close', (code: number | null) => {
+      state.rebuilding.delete(sk);
+      state.containerStatsHistory.delete(sk);
+      state.containerStats.delete(sk);
+      pollStatuses(state);
+
+      const info = state.bottomLogLines.get(sk);
+      if (code !== 0 && code !== null) {
+        if (info) info.action = 'switch_failed';
+        if (state.mode === MODE.LIST) render(state);
+        return;
+      }
+
+      if (info) {
+        info.action = 'started';
+        info.lines = [];
+      }
+
+      startBottomLogTail(state, sk, newFile, service, newProjectName);
+      if (state.mode === MODE.LIST) render(state);
+    });
+  };
+
+  const st = state.statuses.get(sk);
+  if (st && st.state === 'running') {
+    if (state.bottomLogTails.has(sk)) {
+      state.bottomLogTails.get(sk)!.kill('SIGTERM');
+      state.bottomLogTails.delete(sk);
+    }
+    const stopChild = stopService(currentEffective, service, currentProjectName);
+    state.stopping.set(sk, stopChild as Killable);
 
     stopChild.on('close', () => {
       state.stopping.delete(sk);
@@ -788,8 +1103,8 @@ export function doWatch(state: AppState): void {
     return;
   }
 
-  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
-  const child = watchService(effectiveFile, entry.service);
+  const { file: effectiveFile, projectName } = getComposeTarget(state, entry.file, entry.service);
+  const child = watchService(effectiveFile, entry.service, projectName);
   state.watching.set(sk, child as Killable);
   state.bottomLogLines.set(sk, { action: 'watching', service: entry.service, lines: [] });
   state.showBottomLogs = true;
@@ -892,7 +1207,7 @@ export function doCascadeRebuild(state: AppState): void {
   const sk = statusKey(entry.file, entry.service);
   if (state.rebuilding.has(sk) || state.cascading.has(sk)) return;
 
-  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
+  const { file: effectiveFile, projectName } = getComposeTarget(state, entry.file, entry.service);
   let graph = state.depGraphs.get(effectiveFile);
   if (!graph) {
     // Try to parse dep graph for the effective file (may differ from original)
@@ -930,11 +1245,11 @@ export function doCascadeRebuild(state: AppState): void {
   state.bottomLogLines.set(sk, { action: 'cascading', service: entry.service, lines: [] });
   state.showBottomLogs = true;
 
-  executeCascadeStep(state, effectiveFile, sk, cascade);
+  executeCascadeStep(state, effectiveFile, sk, cascade, projectName);
   render(state);
 }
 
-function executeCascadeStep(state: AppState, file: string, sk: string, cascade: CascadeOperation): void {
+function executeCascadeStep(state: AppState, file: string, sk: string, cascade: CascadeOperation, projectName?: string): void {
   const step = cascade.steps[cascade.currentStepIdx];
   if (!step) {
     // All done
@@ -948,9 +1263,9 @@ function executeCascadeStep(state: AppState, file: string, sk: string, cascade: 
 
   let child: ChildProcess | Killable;
   if (step.action === 'rebuild') {
-    child = rebuildService(file, step.service, { noCache: state.noCache, noDeps: state.noDeps });
+    child = rebuildService(file, step.service, { noCache: state.noCache, noDeps: state.noDeps }, projectName);
   } else {
-    child = restartService(file, step.service);
+    child = restartService(file, step.service, projectName);
   }
   cascade.child = child as ChildProcess;
 
@@ -993,7 +1308,7 @@ function executeCascadeStep(state: AppState, file: string, sk: string, cascade: 
     state.containerStats.delete(stepSk);
 
     if (cascade.currentStepIdx < cascade.steps.length) {
-      executeCascadeStep(state, file, sk, cascade);
+      executeCascadeStep(state, file, sk, cascade, projectName);
     } else {
       state.cascading.delete(sk);
       pollStatuses(state);
@@ -1002,7 +1317,7 @@ function executeCascadeStep(state: AppState, file: string, sk: string, cascade: 
         info.action = 'started';
         info.lines = [];
       }
-      startBottomLogTail(state, sk, file, state.flatList[state.cursor]?.service || '');
+      startBottomLogTail(state, sk, file, state.flatList[state.cursor]?.service || '', projectName);
     }
     if (state.mode === MODE.LIST) render(state);
   });
@@ -1199,8 +1514,8 @@ export function enterLogs(state: AppState): void {
   } else {
     state.logBuildKey = null;
 
-    const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
-    const child = tailLogs(effectiveFile, entry.service, 200);
+    const { file: effectiveFile, projectName } = getComposeTarget(state, entry.file, entry.service);
+    const child = tailLogs(effectiveFile, entry.service, 200, projectName);
     state.logChild = child;
 
     let lineBuf = '';
@@ -1271,8 +1586,8 @@ export function loadMoreLogHistory(state: AppState): void {
   state.logHistoryLoading = true;
   const snapshotLen = state.logLines.length;
 
-  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
-  const child = fetchServiceLogs(effectiveFile, entry.service, nextTail);
+  const { file: effectiveFile, projectName } = getComposeTarget(state, entry.file, entry.service);
+  const child = fetchServiceLogs(effectiveFile, entry.service, nextTail, projectName);
   state.logHistoryChild = child;
 
   let output = '';
@@ -1381,8 +1696,8 @@ export function executeBottomSearch(state: AppState): void {
   state.bottomSearchTotalMatches = 0;
   render(state);
 
-  const effectiveFile = getEffectiveFile(state, entry.file, entry.service);
-  const child = fetchServiceLogs(effectiveFile, entry.service, 'all');
+  const { file: effectiveFile, projectName } = getComposeTarget(state, entry.file, entry.service);
+  const child = fetchServiceLogs(effectiveFile, entry.service, 'all', projectName);
   state.bottomSearchChild = child;
 
   let output = '';
@@ -1475,6 +1790,10 @@ export function handleKeypress(state: AppState, key: string): void {
         }
         render(state);
       }
+    } else if (key === '\x11') {
+      // Ctrl+Q — quit
+      cleanup(state);
+      process.exit(0);
     } else if (key === '\x03') {
       // Ctrl+C — kill current exec child
       if (state.execChild) {
@@ -1613,7 +1932,13 @@ export function handleKeypress(state: AppState, key: string): void {
       render(state);
     } else if (key === '\r') {
       const target = state.worktreePickerEntries[state.worktreePickerCursor];
-      if (target) doWorktreeSwitch(state, target);
+      if (target) {
+        if (state.multiSelected.size > 0) {
+          doWorktreeSwitchMulti(state, target);
+        } else {
+          doWorktreeSwitch(state, target);
+        }
+      }
     } else if (key === 'j' || key === '\x1b[B') {
       state.worktreePickerCursor = Math.min(state.worktreePickerEntries.length - 1, state.worktreePickerCursor + 1);
       render(state);
@@ -1657,6 +1982,10 @@ export function handleKeypress(state: AppState, key: string): void {
         }
         render(state);
       }
+    } else if (key === '\x11') {
+      // Ctrl+Q — quit
+      cleanup(state);
+      process.exit(0);
     } else if (key === '\x03') {
       if (state.execChild) {
         state.execChild.kill('SIGTERM');
@@ -1667,7 +1996,8 @@ export function handleKeypress(state: AppState, key: string): void {
         cleanup(state);
         process.exit(0);
       }
-    } else if (key === 'x') {
+    } else if (key === '\x06') {
+      // Ctrl+F — expand to full screen
       enterExec(state);
     } else if (key.length === 1 && key >= ' ') {
       state.execInput += key;
@@ -1699,50 +2029,139 @@ export function handleKeypress(state: AppState, key: string): void {
     return;
   }
 
+  // LIST mode - multiselect Esc
+  if (key === '\x1b' && state.multiSelected.size > 0) {
+    state.multiSelected.clear();
+    updateSelectedLogs(state);
+    render(state);
+    return;
+  }
+
+  const isMulti = state.multiSelected.size > 0;
+
   // LIST mode
   switch (key) {
     case 'j':
     case '\x1b[B':
       moveCursor(state, 1);
-      updateSelectedLogs(state);
+      if (!isMulti) updateSelectedLogs(state);
       render(state);
       break;
     case 'k':
     case '\x1b[A':
       moveCursor(state, -1);
-      updateSelectedLogs(state);
+      if (!isMulti) updateSelectedLogs(state);
       render(state);
       break;
-    case 'b':
-      doRebuild(state);
+    case 'v': {
+      const vEntry = selectedEntry(state);
+      if (vEntry) {
+        const vSk = statusKey(vEntry.file, vEntry.service);
+        if (state.multiSelected.has(vSk)) {
+          state.multiSelected.delete(vSk);
+        } else {
+          state.multiSelected.add(vSk);
+        }
+        moveCursor(state, 1);
+        render(state);
+      }
       break;
+    }
+    case 'b': {
+      if (isMulti) {
+        for (const mSk of state.multiSelected) {
+          const mEntry = state.flatList.find(e => statusKey(e.file, e.service) === mSk);
+          if (mEntry && !state.rebuilding.has(mSk)) {
+            doRebuildEntry(state, mEntry);
+          }
+        }
+        render(state);
+      } else {
+        const bEntry = selectedEntry(state);
+        if (bEntry) {
+          const bSk = statusKey(bEntry.file, bEntry.service);
+          if (state.rebuilding.has(bSk)) {
+            state.rebuilding.get(bSk)!.kill('SIGTERM');
+            state.rebuilding.delete(bSk);
+            const bInfo = state.bottomLogLines.get(bSk);
+            if (bInfo) bInfo.action = 'build_failed';
+            pollStatuses(state);
+            render(state);
+          } else {
+            doRebuild(state);
+          }
+        }
+      }
+      break;
+    }
     case 'd':
-      doCascadeRebuild(state);
+      if (!isMulti) doCascadeRebuild(state);
       break;
     case 'w':
-      doWatch(state);
+      if (!isMulti) doWatch(state);
       break;
     case 'e':
-      enterExecInline(state);
+      if (!isMulti) enterExecInline(state);
       break;
     case 'x':
-      enterExec(state);
+      if (!isMulti) enterExec(state);
       break;
     case 's': {
-      const sEntry = selectedEntry(state);
-      if (sEntry) {
-        const sSk = statusKey(sEntry.file, sEntry.service);
-        const sSt = state.statuses.get(sSk);
-        if (sSt && sSt.state === 'running') {
-          doRestart(state);
-        } else {
-          doStart(state);
+      if (isMulti) {
+        for (const mSk of state.multiSelected) {
+          const mEntry = state.flatList.find(e => statusKey(e.file, e.service) === mSk);
+          if (!mEntry) continue;
+          const mSt = state.statuses.get(mSk);
+          if (state.restarting.has(mSk) || state.starting.has(mSk)) continue;
+          if (mSt && mSt.state === 'running') {
+            doRestartEntry(state, mEntry);
+          } else {
+            doStartEntry(state, mEntry);
+          }
+        }
+        render(state);
+      } else {
+        const sEntry = selectedEntry(state);
+        if (sEntry) {
+          const sSk = statusKey(sEntry.file, sEntry.service);
+          if (state.restarting.has(sSk)) {
+            state.restarting.get(sSk)!.kill('SIGTERM');
+            state.restarting.delete(sSk);
+            const sInfo = state.bottomLogLines.get(sSk);
+            if (sInfo) sInfo.action = 'restart_failed';
+            pollStatuses(state);
+            render(state);
+          } else if (state.starting.has(sSk)) {
+            state.starting.get(sSk)!.kill('SIGTERM');
+            state.starting.delete(sSk);
+            const sInfo = state.bottomLogLines.get(sSk);
+            if (sInfo) sInfo.action = 'start_failed';
+            pollStatuses(state);
+            render(state);
+          } else {
+            const sSt = state.statuses.get(sSk);
+            if (sSt && sSt.state === 'running') {
+              doRestart(state);
+            } else {
+              doStart(state);
+            }
+          }
         }
       }
       break;
     }
     case 'p':
-      doStop(state);
+      if (isMulti) {
+        for (const mSk of state.multiSelected) {
+          const mEntry = state.flatList.find(e => statusKey(e.file, e.service) === mSk);
+          if (mEntry && !state.stopping.has(mSk)) {
+            doStopEntry(state, mEntry);
+          }
+        }
+        render(state);
+      } else {
+        doStop(state);
+      }
       break;
     case 'n':
       state.noCache = !state.noCache;
@@ -1754,14 +2173,20 @@ export function handleKeypress(state: AppState, key: string): void {
       break;
     case 'f':
     case '\r':
-      enterLogs(state);
+      if (!isMulti) enterLogs(state);
       break;
     case 'l':
-      state.showBottomLogs = !state.showBottomLogs;
-      render(state);
+      if (!isMulti) {
+        state.showBottomLogs = !state.showBottomLogs;
+        render(state);
+      }
       break;
     case 't':
-      openWorktreePicker(state);
+      if (isMulti) {
+        openWorktreePickerMulti(state);
+      } else {
+        openWorktreePicker(state);
+      }
       break;
     case 'q':
       cleanup(state);
@@ -1769,17 +2194,20 @@ export function handleKeypress(state: AppState, key: string): void {
       break;
     case 'G':
       state.cursor = state.flatList.length - 1;
-      updateSelectedLogs(state);
+      if (!isMulti) updateSelectedLogs(state);
       render(state);
       break;
     case 'g':
       break;
     case '/':
-      if (state.showBottomLogs) {
+      if (!isMulti && state.showBottomLogs) {
         state.bottomSearchActive = true;
         state.bottomSearchQuery = '';
         render(state);
       }
+      break;
+    default:
+      if (!isMulti) executeCustomAction(state, key);
       break;
   }
 }
@@ -1917,6 +2345,11 @@ export function cleanup(state: AppState): void {
     clearTimeout(moduleState.pendingRender);
     moduleState.pendingRender = null;
   }
+  stopBottomLogLoadingAnim(state);
+  if (state.animTimer) {
+    clearInterval(state.animTimer);
+    state.animTimer = null;
+  }
   if (state.logScanTimer) {
     clearInterval(state.logScanTimer);
   }
@@ -1926,7 +2359,12 @@ export function cleanup(state: AppState): void {
   if (state.statsTimer) {
     clearInterval(state.statsTimer);
   }
-  process.stdout.write('\x1b[r' + showCursor() + '\x1b[0m\x1b[?1049l');
+  // Only write raw ANSI cleanup if Ink is not managing the terminal
+  if (!(state as any)._inkRender) {
+    process.stdout.write('\x1b[r' + showCursor() + '\x1b[0m\x1b[?1049l');
+  } else {
+    process.stdout.write('\x1b[?1049l');
+  }
 }
 
 // Expose for testing
@@ -1957,26 +2395,55 @@ async function main(): Promise<void> {
   pollStatuses(state);
   initDepGraphs(state);
 
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-  }
-  process.stdin.resume();
-  process.stdin.setEncoding('utf8');
-
   const themeMode = await detectTheme(config.theme);
   setActivePalette(getPalette(themeMode));
 
-  process.stdin.on('data', createInputHandler(state));
+  // Load Ink and React
+  const inkModule = await import('ink');
+  React = await import('react');
+  const appModule = await import('./components/App.js');
+  AppComponent = appModule.App;
+  inkRenderFn = inkModule.render;
+
+  // Handle keypresses through the imperative handleKeypress + gg logic
+  const onKeypress = (key: string): void => {
+    if (key === 'gg') {
+      if (state.mode === MODE.LIST) {
+        state.cursor = 0;
+        state.scrollOffset = 0;
+        updateSelectedLogs(state);
+      } else if (state.mode === MODE.LOGS) {
+        state.logAutoScroll = false;
+        const ggRows = process.stdout.rows ?? 24;
+        const ggAvailable = Math.max(1, ggRows - 9);
+        state.logScrollOffset = Math.max(0, state.logLines.length - ggAvailable);
+        if (!state.logHistoryLoaded) {
+          state.logFetchedTailCount = 5000;
+          loadMoreLogHistory(state);
+        }
+      }
+      render(state);
+      return;
+    }
+    handleKeypress(state, key);
+  };
+
+  // Render with Ink
+  const inkInstance = inkRenderFn(
+    React.createElement(AppComponent, { state, themeMode, onKeypress }),
+    {
+      exitOnCtrlC: false,
+      patchConsole: false,
+    }
+  );
 
   pollLogCounts(state);
-
   updateSelectedLogs(state);
-  render(state);
+  ensureAnimTimer(state);
 
   state.pollTimer = setInterval(() => {
     if (state.mode === MODE.LIST) {
       pollStatuses(state);
-      render(state);
     }
   }, config.pollInterval);
 
@@ -1993,10 +2460,6 @@ async function main(): Promise<void> {
     }
   }, config.statsInterval || 5000);
 
-  process.stdout.on('resize', () => {
-    render(state);
-  });
-
   process.on('exit', () => cleanup(state));
   process.on('SIGINT', () => {
     cleanup(state);
@@ -2009,7 +2472,9 @@ async function main(): Promise<void> {
 }
 
 // Only run main when executed directly (not when imported for testing)
-if (require.main === module) {
+const __filename = fileURLToPath(import.meta.url);
+const __argv1 = process.argv[1] ? fs.realpathSync(path.resolve(process.argv[1])) : '';
+if (__argv1 === __filename) {
   main().catch((err) => {
     process.stderr.write(`${err}\n`);
     process.exit(1);

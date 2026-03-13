@@ -2,6 +2,7 @@
   "name": "recomposable",
   "version": "1.1.7",
   "description": "Docker Compose TUI manager with vim keybindings — monitor, restart, rebuild, and tail logs for your services",
+  "type": "module",
   "main": "dist/index.js",
   "bin": {
     "recomposable": "./dist/index.js"
@@ -42,7 +43,13 @@
   },
   "devDependencies": {
     "@types/node": "^20",
+    "@types/react": "^19.2.14",
+    "ink-testing-library": "^4.0.0",
     "typescript": "^5.7",
     "vitest": "^3.0"
+  },
+  "dependencies": {
+    "ink": "^5.2.1",
+    "react": "^18.3.1"
   }
 }

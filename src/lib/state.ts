@@ -1,4 +1,5 @@
-import { MODE, type Config, type AppState, type ServiceGroup, type FlatEntry } from './types';
+import path from 'path';
+import { MODE, type Config, type AppState, type ServiceGroup, type FlatEntry } from './types.js';
 
 export { MODE };
 
@@ -18,11 +19,14 @@ export function createState(config: Config): AppState {
     logChild: null,
     scrollOffset: 0,
     noCache: false,
-    noDeps: false,
+    noDeps: true,
     showBottomLogs: true,
     bottomLogLines: new Map(),
     bottomLogTails: new Map(),
     selectedLogKey: null,
+    bottomLogLoading: false,
+    animDots: 0,
+    animTimer: null,
     logCounts: new Map(),
     logLines: [],
     logScrollOffset: 0,
@@ -67,6 +71,7 @@ export function createState(config: Config): AppState {
     worktreePickerEntries: [],
     worktreePickerCursor: 0,
     worktreePickerCurrentPath: null,
+    multiSelected: new Set(),
     config,
   };
 }
@@ -97,6 +102,22 @@ export function selectedEntry(state: AppState): FlatEntry | null {
 
 export function getEffectiveFile(state: AppState, file: string, service: string): string {
   return state.worktreeOverrides.get(statusKey(file, service)) || file;
+}
+
+/** Docker Compose project name derived from compose file's parent directory. */
+export function composeProjectName(file: string): string {
+  return path.basename(path.dirname(path.resolve(file))).toLowerCase().replace(/[^a-z0-9_-]/g, '');
+}
+
+/**
+ * Returns the effective compose file and, when a worktree override is active,
+ * the project name from the *original* file so that Docker Compose targets the
+ * same project regardless of which worktree is in use.
+ */
+export function getComposeTarget(state: AppState, file: string, service: string): { file: string; projectName: string | undefined } {
+  const effectiveFile = getEffectiveFile(state, file, service);
+  const projectName = effectiveFile !== file ? composeProjectName(file) : undefined;
+  return { file: effectiveFile, projectName };
 }
 
 export function worktreeLabel(worktree: string | null): string {

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createTestState, createTestConfig, createMockKillable } from './helpers';
 import { createState, statusKey, buildFlatList, moveCursor, selectedEntry, MODE } from '../src/lib/state';
-import type { AppState, Config } from '../src/lib/types';
+import type { AppState, Config, CustomAction } from '../src/lib/types';
 
 // We test pure/testable functions from index.ts.
 // For functions that call docker/renderer, we mock them.
@@ -24,6 +24,8 @@ vi.mock('../src/lib/docker', () => ({
   tailLogs: vi.fn(() => mockChildProcess()),
   fetchServiceLogs: vi.fn(() => mockChildProcess()),
   getContainerId: vi.fn(() => null),
+  getContainerIdAsync: vi.fn(async () => null),
+  getStatusesAsync: vi.fn(async () => new Map()),
   tailContainerLogs: vi.fn(() => mockChildProcess()),
   fetchContainerLogs: vi.fn(() => mockChildProcess()),
   fetchContainerStats: vi.fn(() => mockChildProcess()),
@@ -1060,13 +1062,13 @@ describe('handleKeypress - exec keybinding', () => {
     expect(state.execActive).toBe(false);
   });
 
-  it('x from inline exec expands to full screen', () => {
+  it('Ctrl+F from inline exec expands to full screen', () => {
     const state = createTestState();
     state.execActive = true;
     state.execService = 'postgres';
     state.execContainerId = 'abc123';
     state.execOutputLines = ['$ ls', 'file1', 'file2'];
-    handleKeypress(state, 'x');
+    handleKeypress(state, '\x06');
     expect(state.mode).toBe(MODE.EXEC);
     expect(state.execActive).toBe(false);
     // Preserves existing output
@@ -1491,27 +1493,190 @@ describe('doWorktreeSwitch - groups not modified', () => {
 
 describe('pollStatuses with worktree overrides', () => {
   let pollStatuses: (state: AppState) => void;
-  let getStatusesMock: ReturnType<typeof vi.fn>;
+  let getStatusesAsyncMock: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     const mod = await import('../src/index');
     pollStatuses = mod.pollStatuses;
     const docker = await import('../src/lib/docker');
-    getStatusesMock = docker.getStatuses as ReturnType<typeof vi.fn>;
+    getStatusesAsyncMock = docker.getStatusesAsync as ReturnType<typeof vi.fn>;
   });
 
-  it('polls override file for services with worktree overrides', () => {
+  it('polls override file for services with worktree overrides', async () => {
     const state = createTestState();
     const entry = state.flatList[0];
     const sk = statusKey(entry.file, entry.service);
     const overrideFile = '/override/docker-compose.yml';
     state.worktreeOverrides.set(sk, overrideFile);
 
-    getStatusesMock.mockReturnValue(new Map());
+    getStatusesAsyncMock.mockResolvedValue(new Map());
     pollStatuses(state);
 
+    // Wait for the async pollStatusesAsync to complete
+    await new Promise(resolve => setTimeout(resolve, 10));
+
     // Should have been called with both the original file and the override file
-    const calledFiles = getStatusesMock.mock.calls.map((c: unknown[]) => c[0]);
+    const calledFiles = getStatusesAsyncMock.mock.calls.map((c: unknown[]) => c[0]);
     expect(calledFiles).toContain(overrideFile);
+  });
+});
+
+describe('substituteVariables', () => {
+  let substituteVariables: (template: string, vars: Record<string, string>) => string;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    substituteVariables = mod.substituteVariables;
+  });
+
+  it('replaces known variables', () => {
+    expect(substituteVariables('cd {workingDir}', { workingDir: '/app' })).toBe('cd /app');
+  });
+
+  it('replaces multiple variables', () => {
+    expect(substituteVariables('{service} in {file}', { service: 'api', file: 'compose.yml' })).toBe('api in compose.yml');
+  });
+
+  it('leaves unknown placeholders unchanged', () => {
+    expect(substituteVariables('{unknown}', { service: 'api' })).toBe('{unknown}');
+  });
+
+  it('handles empty values', () => {
+    expect(substituteVariables('cd {workingDir}', { workingDir: '' })).toBe('cd ');
+  });
+
+  it('returns template unchanged when no placeholders', () => {
+    expect(substituteVariables('echo hello', { service: 'api' })).toBe('echo hello');
+  });
+});
+
+describe('loadConfig - customActions', () => {
+  let loadConfig: () => Config;
+  const origCwd = process.cwd;
+  const origArgv = process.argv;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    loadConfig = mod.loadConfig;
+  });
+
+  afterEach(() => {
+    process.cwd = origCwd;
+    process.argv = origArgv;
+  });
+
+  it('parses valid custom actions', async () => {
+    const fs = await import('fs');
+    const existsSyncSpy = vi.spyOn(fs.default, 'existsSync').mockReturnValue(true);
+    const readFileSyncSpy = vi.spyOn(fs.default, 'readFileSync').mockReturnValue(JSON.stringify({
+      composeFiles: ['test.yml'],
+      customActions: [
+        { key: '1', label: 'iTerm', command: 'open {workingDir}' },
+        { key: '2', label: 'Code', command: 'code {workingDir}' },
+      ],
+    }));
+
+    const config = loadConfig();
+    expect(config.customActions).toHaveLength(2);
+    expect(config.customActions[0]).toEqual({ key: '1', label: 'iTerm', command: 'open {workingDir}' });
+    expect(config.customActions[1]).toEqual({ key: '2', label: 'Code', command: 'code {workingDir}' });
+
+    existsSyncSpy.mockRestore();
+    readFileSyncSpy.mockRestore();
+  });
+
+  it('skips actions with conflicting reserved keys', async () => {
+    const fs = await import('fs');
+    const existsSyncSpy = vi.spyOn(fs.default, 'existsSync').mockReturnValue(true);
+    const readFileSyncSpy = vi.spyOn(fs.default, 'readFileSync').mockReturnValue(JSON.stringify({
+      composeFiles: ['test.yml'],
+      customActions: [
+        { key: 'b', label: 'conflicts', command: 'echo nope' },
+        { key: '1', label: 'valid', command: 'echo yes' },
+      ],
+    }));
+
+    const config = loadConfig();
+    expect(config.customActions).toHaveLength(1);
+    expect(config.customActions[0].key).toBe('1');
+
+    existsSyncSpy.mockRestore();
+    readFileSyncSpy.mockRestore();
+  });
+
+  it('skips duplicate keys', async () => {
+    const fs = await import('fs');
+    const existsSyncSpy = vi.spyOn(fs.default, 'existsSync').mockReturnValue(true);
+    const readFileSyncSpy = vi.spyOn(fs.default, 'readFileSync').mockReturnValue(JSON.stringify({
+      composeFiles: ['test.yml'],
+      customActions: [
+        { key: '1', label: 'first', command: 'echo first' },
+        { key: '1', label: 'duplicate', command: 'echo second' },
+      ],
+    }));
+
+    const config = loadConfig();
+    expect(config.customActions).toHaveLength(1);
+    expect(config.customActions[0].label).toBe('first');
+
+    existsSyncSpy.mockRestore();
+    readFileSyncSpy.mockRestore();
+  });
+
+  it('skips invalid shapes', async () => {
+    const fs = await import('fs');
+    const existsSyncSpy = vi.spyOn(fs.default, 'existsSync').mockReturnValue(true);
+    const readFileSyncSpy = vi.spyOn(fs.default, 'readFileSync').mockReturnValue(JSON.stringify({
+      composeFiles: ['test.yml'],
+      customActions: [
+        'not-an-object',
+        { key: 'ab', label: 'bad key', command: 'echo' },
+        { key: '1', label: '', command: 'echo' },
+        { key: '2', label: 'no command', command: '' },
+        { key: '3', label: 'valid', command: 'echo ok' },
+      ],
+    }));
+
+    const config = loadConfig();
+    expect(config.customActions).toHaveLength(1);
+    expect(config.customActions[0].key).toBe('3');
+
+    existsSyncSpy.mockRestore();
+    readFileSyncSpy.mockRestore();
+  });
+});
+
+describe('executeCustomAction', () => {
+  let executeCustomAction: (state: AppState, key: string) => boolean;
+
+  beforeEach(async () => {
+    const mod = await import('../src/index');
+    executeCustomAction = mod.executeCustomAction;
+  });
+
+  it('returns true for configured key', () => {
+    const state = createTestState({
+      config: createTestConfig({
+        customActions: [{ key: '1', label: 'iTerm', command: 'open {service}' }],
+      }),
+    });
+    const result = executeCustomAction(state, '1');
+    expect(result).toBe(true);
+  });
+
+  it('returns false for unconfigured key', () => {
+    const state = createTestState({
+      config: createTestConfig({
+        customActions: [{ key: '1', label: 'iTerm', command: 'open {service}' }],
+      }),
+    });
+    const result = executeCustomAction(state, '9');
+    expect(result).toBe(false);
+  });
+
+  it('returns false when no custom actions configured', () => {
+    const state = createTestState();
+    const result = executeCustomAction(state, '1');
+    expect(result).toBe(false);
   });
 });

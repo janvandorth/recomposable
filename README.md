@@ -4,7 +4,7 @@ A lightweight Docker Compose TUI manager with vim keybindings. Monitor service s
 
 Eliminate switching between countless terminal tabs or windows to rebuild you docker compose containers.
 
-Zero dependencies. Pure Node.js.
+Built on [Ink](https://github.com/vadimdemedes/ink) (React for the terminal) for fast, flicker-free rendering. Zero runtime dependencies beyond Ink.
 
 ![recomposable demo](screenshots/demo.gif)
 
@@ -47,8 +47,9 @@ recomposable
 - **No cache mode** — toggle to force a full clean rebuild (`--no-cache` + `--force-recreate`), off by default
 - **Docker Compose Watch** — toggle `docker compose watch` per service, with live output in the log panel
 - **Dependency-aware rebuild** — rebuild a service then automatically restart all its transitive dependents in topological order
-- **Container exec** — run commands inside any container, inline in the bottom panel (`e`) or full-screen (`x`), with `cd` support and command history
+- **Container exec** — run commands inside any container, inline in the bottom panel (`e`) or full-screen (`Ctrl+F`), with `cd` support and command history
 - **Worktree switching** — switch any service to run from a different git worktree (`t`), automatically rebuilds and starts in the target branch
+- **Multi-select** — select multiple services with `v`, then rebuild, restart, stop or switch worktree in batch
 - **Vim keybindings** — navigate with `j`/`k`, `G`/`gg`, and more
 
 ## Full Log View
@@ -57,7 +58,7 @@ recomposable
 
 ## Exec Mode
 
-Run commands inside any running container without leaving the TUI. Press `e` for inline exec in the bottom panel, or `x` for full-screen exec. `cd` works — the working directory is tracked across commands.
+Run commands inside any running container without leaving the TUI. Press `e` for inline exec in the bottom panel, or `Ctrl+F` to expand to full-screen. `cd` works — the working directory is tracked across commands.
 
 ![recomposable exec view](screenshots/exec-view.png)
 
@@ -120,7 +121,7 @@ recomposable -f docker-compose.yml -f docker-compose.prod.yml
 | `logScanPatterns` | `["WRN]", "ERR]"]` | Patterns to count in container logs |
 | `logScanLines` | `1000` | Number of log lines to scan for pattern counts |
 | `logScanInterval` | `10000` | Pattern scanning interval in milliseconds |
-| `bottomLogCount` | `10` | Number of log lines shown in the inline log panel |
+| `bottomLogCount` | `10` | Minimum log lines in the inline log panel (panel expands to fill available space) |
 | `statsInterval` | `5000` | CPU/memory polling interval in milliseconds |
 | `statsBufferSize` | `6` | Number of samples for rolling average (e.g. 6 x 5s = 30s window) |
 | `cpuWarnThreshold` | `50` | CPU % above which the column turns yellow |
@@ -136,13 +137,13 @@ recomposable -f docker-compose.yml -f docker-compose.prod.yml
 |---|---|
 | `j` / `Down` | Move cursor down |
 | `k` / `Up` | Move cursor up |
-| `s` | Start (if stopped) or restart (if running) |
+| `s` | Restart selected service |
 | `p` | Stop selected service |
+| `v` | Toggle multi-select on current service |
 | `b` | Rebuild selected service (`up -d --build`) |
 | `d` | Dependency-aware rebuild (rebuild + restart all dependents) |
 | `w` | Toggle Docker Compose Watch for selected service |
 | `e` | Inline exec in bottom panel |
-| `x` | Full-screen exec mode |
 | `n` | Toggle no-cache mode (rebuild with `--no-cache` + `--force-recreate`) |
 | `f` / `Enter` | Full-screen log view for selected service |
 | `t` | Switch service to a different git worktree |
@@ -168,6 +169,19 @@ recomposable -f docker-compose.yml -f docker-compose.prod.yml
 | `Esc` / `f` | Exit log view |
 | `q` | Quit |
 
+### Multi-select mode
+
+Press `v` on services to select them, then perform batch actions.
+
+| Key | Action |
+|---|---|
+| `v` | Toggle selection on current service |
+| `b` | Rebuild all selected services |
+| `s` | Restart all selected services |
+| `p` | Stop all selected services |
+| `t` | Switch all selected services to a different worktree |
+| `Esc` | Discard selection |
+
 ### Exec mode (inline & full-screen)
 
 | Key | Action |
@@ -175,8 +189,9 @@ recomposable -f docker-compose.yml -f docker-compose.prod.yml
 | Type | Enter commands |
 | `Enter` | Execute command |
 | `Up` / `Down` | Navigate command history |
-| `x` | Expand inline exec to full screen |
-| `Ctrl+C` | Kill running command (double to quit) |
+| `Ctrl+F` | Expand inline exec to full screen |
+| `Ctrl+C` | Kill running command |
+| `Ctrl+Q` | Quit |
 | `Esc` | Exit exec mode |
 
 ## Status Icons

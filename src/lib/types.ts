@@ -7,6 +7,14 @@ import type { PassThrough } from 'stream';
 export const MODE = { LIST: 'LIST', LOGS: 'LOGS', EXEC: 'EXEC' } as const;
 export type Mode = typeof MODE[keyof typeof MODE];
 
+// --- Custom actions ---
+
+export interface CustomAction {
+  key: string;
+  label: string;
+  command: string;
+}
+
 // --- Config ---
 
 export interface Config {
@@ -24,6 +32,7 @@ export interface Config {
   memWarnThreshold: number;
   memDangerThreshold: number;
   theme: 'auto' | 'light' | 'dark';
+  customActions: CustomAction[];
 }
 
 // --- Port / Status ---
@@ -153,6 +162,9 @@ export interface AppState {
   bottomLogLines: Map<string, BottomLogInfo>;
   bottomLogTails: Map<string, Killable>;
   selectedLogKey: string | null;
+  bottomLogLoading: boolean;
+  animDots: number;
+  animTimer: ReturnType<typeof setInterval> | null;
   logCounts: Map<string, Map<string, number>>;
   logLines: string[];
   logScrollOffset: number;
@@ -197,6 +209,8 @@ export interface AppState {
   worktreePickerEntries: GitWorktree[];
   worktreePickerCursor: number;
   worktreePickerCurrentPath: string | null;
+  // Multi-select
+  multiSelected: Set<string>;  // statusKey strings
   config: Config;
   pollTimer?: ReturnType<typeof setInterval>;
   logScanTimer?: ReturnType<typeof setInterval>;
@@ -216,6 +230,10 @@ export interface LegendOptions {
   execMode?: boolean;
   execInline?: boolean;
   worktreePickerActive?: boolean;
+  customActions?: CustomAction[];
+  buildingActive?: boolean;
+  startingActive?: boolean;
+  multiSelectActive?: boolean;
 }
 
 export interface DisplayLine {

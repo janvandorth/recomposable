@@ -237,7 +237,7 @@ describe('renderLegend', () => {
   it('renders list mode legend by default', () => {
     const result = strip(renderLegend());
     expect(result).toContain('Re[B]uild');
-    expect(result).toContain('[S]tart/restart');
+    expect(result).toContain('Re[S]tart');
     expect(result).toContain('[Q]uit');
   });
 
@@ -493,7 +493,7 @@ describe('renderListView', () => {
     expect(output).toContain('\x1b[31m2024-01-01 ERR]');
   });
 
-  it('keeps gray for lines without any pattern in bottom panel', () => {
+  it('uses dim color for lines without any pattern in bottom panel', () => {
     const state = createTestState();
     const sk = statusKey(state.groups[0].file, 'postgres');
     state.selectedLogKey = sk;
@@ -503,8 +503,8 @@ describe('renderListView', () => {
       lines: ['2024-01-01 INF] all good'],
     });
     const output = renderListView(state);
-    // The line should start with gray (90m)
-    expect(output).toContain('\x1b[90m2024-01-01 INF]');
+    // The line should start with dim (38;5;250m)
+    expect(output).toContain('\x1b[38;5;250m2024-01-01 INF]');
   });
 
   it('shows service name always in bold regardless of worktree', () => {
@@ -617,8 +617,8 @@ describe('renderLogView build status header', () => {
     state.logLines = ['build output line'];
     const output = renderLogView(state);
     const text = strip(output);
-    expect(text).toContain('rebuilding postgres');
-    expect(text).not.toContain('full logs');
+    expect(text).toContain('Build logs postgres');
+    expect(text).not.toContain('Run logs');
   });
 
   it('shows "build failed" header when logBuildKey is set and build failed', () => {
@@ -641,7 +641,7 @@ describe('renderLogView build status header', () => {
     state.logLines = ['runtime log'];
     const output = renderLogView(state);
     const text = strip(output);
-    expect(text).toContain('full logs postgres');
+    expect(text).toContain('Run logs postgres');
   });
 });
 
@@ -1009,5 +1009,24 @@ describe('renderListView - worktree picker overlay', () => {
     state.showBottomLogs = true;
     const output = strip(renderListView(state));
     expect(output).toContain('SWITCH FAILED');
+  });
+});
+
+describe('renderLegend - custom actions', () => {
+  it('appends custom actions to legend', () => {
+    const result = strip(renderLegend({
+      customActions: [
+        { key: '1', label: 'iTerm tab', command: 'open' },
+        { key: '2', label: 'VS Code', command: 'code' },
+      ],
+    }));
+    expect(result).toContain('[1] iTerm tab');
+    expect(result).toContain('[2] VS Code');
+  });
+
+  it('renders no extra items when customActions is empty', () => {
+    const withActions = strip(renderLegend({ customActions: [] }));
+    const without = strip(renderLegend());
+    expect(withActions).toBe(without);
   });
 });

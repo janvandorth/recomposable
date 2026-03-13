@@ -1,6 +1,9 @@
-import { execFileSync, spawn, type ChildProcess } from 'child_process';
+import { execFile, execFileSync, spawn, type ChildProcess } from 'child_process';
+import { promisify } from 'util';
 import path from 'path';
 import { EventEmitter } from 'events';
+
+const execFileAsync = promisify(execFile);
 import { PassThrough } from 'stream';
 import type {
   ContainerStatus,
@@ -14,18 +17,25 @@ import type {
   RebuildOptions,
   DependencyGraph,
   GitWorktree,
-} from './types';
+} from './types.js';
+
+function composeBaseArgs(file: string, projectName?: string): string[] {
+  const args = ['compose'];
+  if (projectName) args.push('-p', projectName);
+  args.push('-f', path.resolve(file));
+  return args;
+}
 
 export function listServices(file: string): string[] {
   const cwd = path.dirname(path.resolve(file));
-  const args = ['compose', '-f', path.resolve(file), 'config', '--services'];
+  const args = [...composeBaseArgs(file), 'config', '--services'];
   const out = execFileSync('docker', args, { cwd, encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL', stdio: ['pipe', 'pipe', 'pipe'] });
   return out.trim().split('\n').filter(Boolean);
 }
 
-export function getStatuses(file: string): Map<string, ContainerStatus> {
+export function getStatuses(file: string, projectName?: string): Map<string, ContainerStatus> {
   const cwd = path.dirname(path.resolve(file));
-  const args = ['compose', '-f', path.resolve(file), 'ps', '--format', 'json'];
+  const args = [...composeBaseArgs(file, projectName), 'ps', '--format', 'json'];
   let out: string;
   try {
     out = execFileSync('docker', args, { cwd, encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL', stdio: ['pipe', 'pipe', 'pipe'] });
@@ -117,6 +127,101 @@ export function getStatuses(file: string): Map<string, ContainerStatus> {
   return statuses;
 }
 
+export async function getStatusesAsync(file: string, projectName?: string): Promise<Map<string, ContainerStatus>> {
+  const cwd = path.dirname(path.resolve(file));
+  const args = [...composeBaseArgs(file, projectName), 'ps', '--format', 'json'];
+  let out: string;
+  try {
+    const result = await execFileAsync('docker', args, { cwd, encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' as NodeJS.Signals });
+    out = result.stdout;
+  } catch {
+    return new Map();
+  }
+
+  const trimmed = out.trim();
+  if (!trimmed) return new Map();
+
+  const statuses = new Map<string, ContainerStatus>();
+  let containers: DockerComposePsEntry[];
+
+  try {
+    if (trimmed.startsWith('[')) {
+      containers = JSON.parse(trimmed) as DockerComposePsEntry[];
+    } else {
+      containers = trimmed.split('\n').filter(Boolean).map(line => JSON.parse(line) as DockerComposePsEntry);
+    }
+  } catch {
+    return new Map();
+  }
+
+  const idToService = new Map<string, string>();
+
+  for (const c of containers) {
+    const name = c.Service || c.Name || '';
+    const state = (c.State || '').toLowerCase();
+    const health = (c.Health || '').toLowerCase();
+    const createdAt = c.CreatedAt || null;
+    const id = c.ID || null;
+
+    let ports: PortMapping[] = [];
+    if (Array.isArray(c.Publishers)) {
+      for (const p of c.Publishers) {
+        if (p.PublishedPort && p.PublishedPort > 0) {
+          ports.push({ published: p.PublishedPort, target: p.TargetPort });
+        }
+      }
+    } else if (c.Ports) {
+      const portMatches = c.Ports.matchAll(/(\d+)->(\d+)/g);
+      for (const m of portMatches) {
+        ports.push({ published: parseInt(m[1], 10), target: parseInt(m[2], 10) });
+      }
+    }
+    const seen = new Set<number>();
+    ports = ports.filter(p => {
+      if (seen.has(p.published)) return false;
+      seen.add(p.published);
+      return true;
+    });
+
+    statuses.set(name, { state, health, createdAt, startedAt: null, id: id || null, ports, workingDir: null, worktree: null });
+    if (id) idToService.set(id, name);
+  }
+
+  const ids = [...idToService.keys()];
+  if (ids.length > 0) {
+    try {
+      const inspectResult = await execFileAsync('docker', ['inspect', ...ids], {
+        encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' as NodeJS.Signals,
+      });
+      const inspected = JSON.parse(inspectResult.stdout) as DockerInspectEntry[];
+      for (const info of inspected) {
+        for (const [id, svc] of idToService) {
+          if (info.Id && info.Id.startsWith(id)) {
+            const status = statuses.get(svc);
+            if (status) {
+              if (info.State) {
+                status.startedAt = info.State.StartedAt || null;
+              }
+              status.workingDir = info.Config?.Labels?.['com.docker.compose.project.working_dir'] || null;
+            }
+            break;
+          }
+        }
+      }
+    } catch {
+      // Ignore inspect errors
+    }
+  }
+
+  for (const status of statuses.values()) {
+    if (status.workingDir) {
+      status.worktree = resolveGitWorktree(status.workingDir);
+    }
+  }
+
+  return statuses;
+}
+
 const worktreeCache = new Map<string, string | null>();
 
 export function resolveGitWorktree(workingDir: string): string | null {
@@ -134,9 +239,9 @@ export function resolveGitWorktree(workingDir: string): string | null {
   }
 }
 
-export function rebuildService(file: string, service: string, opts: RebuildOptions = {}): RebuildChild {
+export function rebuildService(file: string, service: string, opts: RebuildOptions = {}, projectName?: string): RebuildChild {
   const cwd = path.dirname(path.resolve(file));
-  const resolvedFile = path.resolve(file);
+  const baseArgs = composeBaseArgs(file, projectName);
   const spawnOpts = {
     cwd, stdio: ['ignore', 'pipe', 'pipe'] as ['ignore', 'pipe', 'pipe'], detached: false,
     env: {
@@ -162,7 +267,7 @@ export function rebuildService(file: string, service: string, opts: RebuildOptio
     emitter.stdout = stdout;
     emitter.stderr = stderr;
 
-    const buildChild = spawn('docker', ['compose', '-f', resolvedFile, 'build', '--no-cache', service], spawnOpts);
+    const buildChild = spawn('docker', [...baseArgs, 'build', '--no-cache', service], spawnOpts);
     buildChild.stdout.pipe(stdout, { end: false });
     buildChild.stderr.pipe(stderr, { end: false });
 
@@ -173,7 +278,7 @@ export function rebuildService(file: string, service: string, opts: RebuildOptio
         emitter.emit('close', code);
         return;
       }
-      const upArgs = ['compose', '-f', resolvedFile, 'up', '-d', '--force-recreate'];
+      const upArgs = [...baseArgs, 'up', '-d', '--force-recreate'];
       if (opts.noDeps) upArgs.push('--no-deps');
       upArgs.push(service);
       const upChild = spawn('docker', upArgs, spawnOpts);
@@ -187,36 +292,47 @@ export function rebuildService(file: string, service: string, opts: RebuildOptio
     return emitter;
   }
 
-  const args = ['compose', '-f', resolvedFile, 'up', '-d', '--build'];
+  const args = [...baseArgs, 'up', '-d', '--build'];
   if (opts.noDeps) args.push('--no-deps');
   args.push(service);
   const child = spawn('docker', args, spawnOpts);
   return child;
 }
 
-export function tailLogs(file: string, service: string, tailLines: number | 'all'): ChildProcess {
+export function tailLogs(file: string, service: string, tailLines: number | 'all', projectName?: string): ChildProcess {
   const cwd = path.dirname(path.resolve(file));
-  const args = ['compose', '-f', path.resolve(file), 'logs', '-f', '--tail', String(tailLines), service];
+  const args = [...composeBaseArgs(file, projectName), 'logs', '-f', '--tail', String(tailLines), service];
   const child = spawn('docker', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
   return child;
 }
 
-export function fetchServiceLogs(file: string, service: string, tailLines: number | 'all'): ChildProcess {
+export function fetchServiceLogs(file: string, service: string, tailLines: number | 'all', projectName?: string): ChildProcess {
   const cwd = path.dirname(path.resolve(file));
-  const args = ['compose', '-f', path.resolve(file), 'logs', '--tail', String(tailLines), service];
+  const args = [...composeBaseArgs(file, projectName), 'logs', '--tail', String(tailLines), service];
   const child = spawn('docker', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
   return child;
 }
 
-export function getContainerId(file: string, service: string): string | null {
+export function getContainerId(file: string, service: string, projectName?: string): string | null {
   const cwd = path.dirname(path.resolve(file));
-  const args = ['compose', '-f', path.resolve(file), 'ps', '-q', service];
+  const args = [...composeBaseArgs(file, projectName), 'ps', '-q', service];
   try {
     const out = execFileSync('docker', args, { cwd, encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL' as NodeJS.Signals, stdio: ['pipe', 'pipe', 'pipe'] });
     return out.trim() || null;
   } catch {
     return null;
   }
+}
+
+export function getContainerIdAsync(file: string, service: string, projectName?: string): Promise<string | null> {
+  const cwd = path.dirname(path.resolve(file));
+  const args = [...composeBaseArgs(file, projectName), 'ps', '-q', service];
+  return new Promise((resolve) => {
+    execFile('docker', args, { cwd, encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL' as NodeJS.Signals }, (err, stdout) => {
+      if (err) { resolve(null); return; }
+      resolve(stdout.trim() || null);
+    });
+  });
 }
 
 export function tailContainerLogs(containerId: string, tailLines: number): ChildProcess {
@@ -232,23 +348,23 @@ export function fetchContainerLogs(containerId: string, tailLines: number): Chil
   return child;
 }
 
-export function restartService(file: string, service: string): ChildProcess {
+export function restartService(file: string, service: string, projectName?: string): ChildProcess {
   const cwd = path.dirname(path.resolve(file));
-  const args = ['compose', '-f', path.resolve(file), 'restart', service];
+  const args = [...composeBaseArgs(file, projectName), 'restart', service];
   const child = spawn('docker', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: false });
   return child;
 }
 
-export function stopService(file: string, service: string): ChildProcess {
+export function stopService(file: string, service: string, projectName?: string): ChildProcess {
   const cwd = path.dirname(path.resolve(file));
-  const args = ['compose', '-f', path.resolve(file), 'stop', service];
+  const args = [...composeBaseArgs(file, projectName), 'stop', service];
   const child = spawn('docker', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: false });
   return child;
 }
 
-export function startService(file: string, service: string): ChildProcess {
+export function startService(file: string, service: string, projectName?: string): ChildProcess {
   const cwd = path.dirname(path.resolve(file));
-  const args = ['compose', '-f', path.resolve(file), 'start', service];
+  const args = [...composeBaseArgs(file, projectName), 'start', service];
   const child = spawn('docker', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: false });
   return child;
 }
@@ -300,9 +416,9 @@ export function isWatchAvailable(): boolean {
   return watchAvailableCache;
 }
 
-export function watchService(file: string, service: string): ChildProcess {
+export function watchService(file: string, service: string, projectName?: string): ChildProcess {
   const cwd = path.dirname(path.resolve(file));
-  const args = ['compose', '-f', path.resolve(file), 'watch', service];
+  const args = [...composeBaseArgs(file, projectName), 'watch', service];
   const child = spawn('docker', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: false });
   return child;
 }
